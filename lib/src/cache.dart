@@ -246,8 +246,7 @@ class Cache {
     }
 
     _logger.onRefresh(key, source);
-    final future =
-        _fetchAndStore<T>(key, fetch, persist: persist, ttl: ttl);
+    final future = _fetchAndStore<T>(key, fetch, persist: persist, ttl: ttl);
     _inflight[key] = future;
     try {
       return await future;
