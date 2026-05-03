@@ -1,0 +1,43 @@
+name: Publish to pub.dev
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Tag if version bumped
+        run: |
+          NEW=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | tr -d ' ')
+          OLD=$(git show HEAD~1:pubspec.yaml 2>/dev/null | grep '^version:' | sed 's/version: *//' | tr -d ' ' || echo "")
+          if [ -z "$NEW" ] || [ "$NEW" = "$OLD" ] || git rev-parse "v$NEW" >/dev/null 2>&1; then
+            echo "Nothing to tag"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$NEW" -m "Release v$NEW"
+          git push origin "v$NEW"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - name: Run tests
+        run: dart test
+      - run: dart pub publish --force
