@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.1
+
+Stability & observability — no breaking changes.
+
+- **Cache logger**: pluggable `CacheLogger` (hits, misses, writes, refreshes,
+  invalidations, clears, errors) with `RefreshSource` for filtering. Includes
+  `PrintCacheLogger` for quick wiring.
+- **Cache state insights**: new `Cache.inspect<T>(key)` returns a `CacheState<T>`
+  snapshot — `isPresent`, `isFresh`, `isStale`, `age`, `timeToExpiry`, `expiresAt`.
+- **Safer expiry**: SWR no longer kicks off a redundant background refresh
+  while one is already in flight. Tightens single-flight semantics.
+- **Better error propagation**: fetcher failures (returned `Failure` *or*
+  thrown exceptions) are routed through `CacheLogger.onError` with their
+  original stack trace.
+
 ## 1.0.0
 
 Initial release.

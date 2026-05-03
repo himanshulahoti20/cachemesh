@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'cache_entry.dart';
 import 'cache_exception.dart';
+import 'cache_logger.dart';
 import 'cache_policy.dart';
+import 'cache_state.dart';
 import 'cache_store.dart';
 import 'memory_cache_store.dart';
 import 'result.dart';
@@ -22,13 +24,16 @@ class Cache {
     CacheStore? store,
     Duration? defaultTtl,
     DateTime Function()? clock,
+    CacheLogger? logger,
   })  : _store = store ?? MemoryCacheStore(),
         _defaultTtl = defaultTtl,
-        _now = clock ?? DateTime.now;
+        _now = clock ?? DateTime.now,
+        _logger = logger ?? const CacheLogger();
 
   final CacheStore _store;
   final Duration? _defaultTtl;
   final DateTime Function() _now;
+  final CacheLogger _logger;
 
   final Map<String, Future<Result<dynamic>>> _inflight = {};
   final Map<String, StreamController<Result<dynamic>>> _watchers = {};
@@ -46,45 +51,90 @@ class Cache {
     Duration? ttl,
   }) async {
     final effectiveTtl = ttl ?? _defaultTtl;
+    final now = _now();
 
     switch (policy) {
       case CachePolicy.cacheOnly:
         final entry = _store.read(key);
         if (entry == null) {
+          _logger.onMiss(key);
           return Failure<T>(CacheMissException(key));
         }
-        if (entry.isExpiredAt(_now())) {
+        if (entry.isExpiredAt(now)) {
+          _logger.onMiss(key);
           return Failure<T>(CacheExpiredException(key));
         }
+        _logger.onHit(key);
         return Success<T>(entry.value as T);
 
       case CachePolicy.networkOnly:
-        return _runFetch<T>(key, fetch, persist: false, ttl: effectiveTtl);
+        return _runFetch<T>(
+          key,
+          fetch,
+          persist: false,
+          ttl: effectiveTtl,
+          source: RefreshSource.policy,
+        );
 
       case CachePolicy.cacheFirst:
         final entry = _store.read(key);
-        if (entry != null && !entry.isExpiredAt(_now())) {
+        if (entry != null && !entry.isExpiredAt(now)) {
+          _logger.onHit(key);
           return Success<T>(entry.value as T);
         }
-        return _runFetch<T>(key, fetch, persist: true, ttl: effectiveTtl);
+        _logger.onMiss(key);
+        return _runFetch<T>(
+          key,
+          fetch,
+          persist: true,
+          ttl: effectiveTtl,
+          source: RefreshSource.cacheMiss,
+        );
 
       case CachePolicy.networkFirst:
-        final fresh =
-            await _runFetch<T>(key, fetch, persist: true, ttl: effectiveTtl);
+        final fresh = await _runFetch<T>(
+          key,
+          fetch,
+          persist: true,
+          ttl: effectiveTtl,
+          source: RefreshSource.policy,
+        );
         if (fresh.isSuccess) return fresh;
         final entry = _store.read(key);
-        if (entry != null) return Success<T>(entry.value as T);
+        if (entry != null) {
+          _logger.onHit(key);
+          return Success<T>(entry.value as T);
+        }
         return fresh;
 
       case CachePolicy.staleWhileRevalidate:
         final entry = _store.read(key);
         if (entry != null) {
-          unawaited(
-            _runFetch<T>(key, fetch, persist: true, ttl: effectiveTtl),
-          );
+          _logger.onHit(key);
+          // Only kick off a background refresh if one isn't already in flight.
+          // Single-flight would dedup it anyway, but skipping the call avoids
+          // an unnecessary microtask round-trip and keeps logs clean.
+          if (!_inflight.containsKey(key)) {
+            unawaited(
+              _runFetch<T>(
+                key,
+                fetch,
+                persist: true,
+                ttl: effectiveTtl,
+                source: RefreshSource.background,
+              ),
+            );
+          }
           return Success<T>(entry.value as T);
         }
-        return _runFetch<T>(key, fetch, persist: true, ttl: effectiveTtl);
+        _logger.onMiss(key);
+        return _runFetch<T>(
+          key,
+          fetch,
+          persist: true,
+          ttl: effectiveTtl,
+          source: RefreshSource.cacheMiss,
+        );
     }
   }
 
@@ -94,7 +144,13 @@ class Cache {
     required Fetcher<T> fetch,
     Duration? ttl,
   }) =>
-      _runFetch<T>(key, fetch, persist: true, ttl: ttl ?? _defaultTtl);
+      _runFetch<T>(
+        key,
+        fetch,
+        persist: true,
+        ttl: ttl ?? _defaultTtl,
+        source: RefreshSource.refresh,
+      );
 
   /// Like [refresh] but framed as a warmup: fetches and caches eagerly so a
   /// subsequent [get] is an instant cache hit.
@@ -103,17 +159,25 @@ class Cache {
     required Fetcher<T> fetch,
     Duration? ttl,
   }) =>
-      refresh(key: key, fetch: fetch, ttl: ttl);
+      _runFetch<T>(
+        key,
+        fetch,
+        persist: true,
+        ttl: ttl ?? _defaultTtl,
+        source: RefreshSource.prefetch,
+      );
 
   /// Drops the entry for [key]. Watchers remain subscribed but do not receive
-  /// an emission for the removal in v1.0.0.
+  /// an emission for the removal.
   void invalidate(String key) {
     _store.delete(key);
+    _logger.onInvalidate(key);
   }
 
   /// Drops every entry from the underlying store.
   void clear() {
     _store.clear();
+    _logger.onClear();
   }
 
   /// Subscribes to updates for [key].
@@ -142,6 +206,23 @@ class Cache {
     return entry.value as T;
   }
 
+  /// Returns a [CacheState] snapshot describing what the cache currently
+  /// holds for [key]. Never triggers a fetch. New in v1.0.1.
+  CacheState<T> inspect<T>(String key) {
+    final entry = _store.read(key);
+    final now = _now();
+    if (entry == null) {
+      return CacheState<T>(key: key, now: now);
+    }
+    return CacheState<T>(
+      key: key,
+      now: now,
+      value: entry.value as T,
+      createdAt: entry.createdAt,
+      ttl: entry.ttl,
+    );
+  }
+
   /// Closes any open watcher streams. Safe to call multiple times.
   Future<void> dispose() async {
     final controllers = List.of(_watchers.values);
@@ -156,6 +237,7 @@ class Cache {
     Fetcher<T> fetch, {
     required bool persist,
     required Duration? ttl,
+    required RefreshSource source,
   }) async {
     final existing = _inflight[key];
     if (existing != null) {
@@ -163,6 +245,7 @@ class Cache {
       return _castResult<T>(shared);
     }
 
+    _logger.onRefresh(key, source);
     final future = _fetchAndStore<T>(key, fetch, persist: persist, ttl: ttl);
     _inflight[key] = future;
     try {
@@ -189,11 +272,17 @@ class Cache {
       result = Failure<T>(e, st);
     }
 
+    if (result is Failure<T>) {
+      _logger.onError(key, result.error, result.stackTrace);
+      return result;
+    }
+
     if (persist && result is Success<T>) {
       _store.write(
         key,
         CacheEntry<T>(value: result.value, createdAt: _now(), ttl: ttl),
       );
+      _logger.onWrite(key, ttl: ttl);
       _emit<T>(key, result);
     }
     return result;
