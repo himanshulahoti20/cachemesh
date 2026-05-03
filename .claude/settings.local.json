@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf .dart_tool pubspec.lock)",
+      "Bash(dart pub *)",
+      "Bash(dart analyze *)",
+      "Bash(dart test *)"
+    ]
+  }
+}

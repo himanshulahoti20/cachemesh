@@ -1,0 +1,13 @@
+name: cachemesh
+description: Result-first caching and data orchestration layer for Dart and Flutter apps. Memory-first cache with policies, single-flight dedup, and reactive watch streams.
+version: 1.0.0
+homepage:
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.0.0
