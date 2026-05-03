@@ -22,7 +22,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^1.0.0
+  cachemesh: ^1.0.1
 ```
 
 ## Quick start
@@ -107,9 +107,36 @@ final cached = cache.peek<User>('user:42');
 final cache = Cache(store: MyCustomStore());
 ```
 
+## Logging *(v1.0.1)*
+
+```dart
+final cache = Cache(logger: const PrintCacheLogger());
+// [cachemesh] miss user:42
+// [cachemesh] refresh user:42 (cacheMiss)
+// [cachemesh] write user:42 ttl=300000ms
+// [cachemesh] hit user:42
+```
+
+Override `CacheLogger`'s methods to ship events to your own logging stack.
+Each refresh comes with a `RefreshSource` (`cacheMiss`, `policy`,
+`background`, `refresh`, `prefetch`) so you can filter the noisy ones.
+
+## Cache state insights *(v1.0.1)*
+
+```dart
+final state = cache.inspect<User>('user:42');
+if (state.isMissing) showSkeleton();
+else if (state.isStale) showWithStaleBanner(state.value!);
+else showFresh(state.value!);
+
+state.age;          // Duration since the entry was written
+state.timeToExpiry; // negative if past TTL
+state.expiresAt;    // null if no TTL
+```
+
 ## Roadmap
 
-- **1.0.1** — pluggable logger, cache state insights, safer expiry.
+- **1.0.1** ✅ — pluggable logger, cache state insights, safer expiry.
 - **1.0.2** — failure-aware caching, retry hooks.
 - **1.1.0** — `resilify` & `token_keeper` integration, cache scopes.
 - **1.2.0** — disk adapters, hydration, offline-first.

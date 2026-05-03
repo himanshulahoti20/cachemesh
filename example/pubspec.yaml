@@ -1,0 +1,14 @@
+name: cachemesh_example
+description: Runnable examples for the cachemesh package.
+publish_to: none
+version: 1.0.0
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  cachemesh:
+    path: ../
+
+dev_dependencies:
+  lints: ^5.0.0
