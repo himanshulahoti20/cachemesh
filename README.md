@@ -6,7 +6,6 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![CI](https://github.com/himanshulahoti20/cachemesh/actions/workflows/dart_ci.yml/badge.svg?branch=main&cache_bust=1)
 
-
 **Cache smarter. Orchestrate data. Stay fast.**
 
 A `Result`-first caching and data orchestration layer for Dart & Flutter apps.
