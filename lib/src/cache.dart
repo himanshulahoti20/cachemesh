@@ -8,12 +8,31 @@ import 'cache_state.dart';
 import 'cache_store.dart';
 import 'memory_cache_store.dart';
 import 'result.dart';
+import 'retry_options.dart';
 
 /// A function that produces a fresh value asynchronously.
 ///
 /// Fetchers should return a [Result] rather than throwing — but raised
 /// exceptions are caught and converted to a [Failure] regardless.
 typedef Fetcher<T> = Future<Result<T>> Function();
+
+/// Stores a cached [Failure] alongside its TTL bookkeeping.
+class _CachedFailure {
+  _CachedFailure({
+    required this.failure,
+    required this.createdAt,
+    this.ttl,
+  });
+
+  final Failure<dynamic> failure;
+  final DateTime createdAt;
+  final Duration? ttl;
+
+  bool isExpiredAt(DateTime now) {
+    if (ttl == null) return false;
+    return !now.isBefore(createdAt.add(ttl!));
+  }
+}
 
 /// The unified cache + data orchestration entry point.
 ///
@@ -25,44 +44,69 @@ class Cache {
     Duration? defaultTtl,
     DateTime Function()? clock,
     CacheLogger? logger,
+    RetryOptions? retryOptions,
+    bool cacheFailures = false,
   })  : _store = store ?? MemoryCacheStore(),
         _defaultTtl = defaultTtl,
         _now = clock ?? DateTime.now,
-        _logger = logger ?? const CacheLogger();
+        _logger = logger ?? const CacheLogger(),
+        _defaultRetryOptions = retryOptions ?? RetryOptions.noRetry,
+        _defaultCacheFailures = cacheFailures;
 
   final CacheStore _store;
   final Duration? _defaultTtl;
   final DateTime Function() _now;
   final CacheLogger _logger;
+  final RetryOptions _defaultRetryOptions;
+  final bool _defaultCacheFailures;
 
   final Map<String, Future<Result<dynamic>>> _inflight = {};
   final Map<String, StreamController<Result<dynamic>>> _watchers = {};
 
+  // Separate store for cached failures (v1.0.2 failure-aware caching).
+  final Map<String, _CachedFailure> _failureCache = {};
+
   /// Reads from / writes to the cache for [key] according to [policy].
   ///
   /// [fetch] is the source of truth used when the policy needs fresh data.
-  /// [ttl] overrides the cache-wide [Cache.new]'s `defaultTtl` for this entry;
-  /// passing `null` falls back to that default (and `null` there means no
-  /// expiration).
+  ///
+  /// **v1.0.2 options**
+  /// - [retryOptions]: overrides the cache-wide default for this call.
+  /// - [cacheFailures]: overrides the cache-wide default for this call.
+  ///   When `true`, a failure returned after exhausting retries is cached so
+  ///   the next `cacheFirst` / `cacheOnly` lookup returns it immediately.
+  /// - [alwaysRevalidate]: only relevant for [CachePolicy.staleWhileRevalidate].
+  ///   When `false` (default) a background refresh is only kicked off when the
+  ///   entry is stale; when `true` the pre-v1.0.2 behaviour is restored
+  ///   (revalidate even if the entry is still fresh).
   Future<Result<T>> get<T>({
     required String key,
     required Fetcher<T> fetch,
     CachePolicy policy = CachePolicy.cacheFirst,
     Duration? ttl,
+    RetryOptions? retryOptions,
+    bool? cacheFailures,
+    bool alwaysRevalidate = false,
   }) async {
     final effectiveTtl = ttl ?? _defaultTtl;
+    final effectiveRetry = retryOptions ?? _defaultRetryOptions;
+    final effectiveCacheFailures = cacheFailures ?? _defaultCacheFailures;
     final now = _now();
 
     switch (policy) {
       case CachePolicy.cacheOnly:
+        // Check success cache.
         final entry = _store.read(key);
-        if (entry == null) {
+        if (entry == null || entry.isExpiredAt(now)) {
+          // Check failure cache before giving up.
+          final cached = _failureCache[key];
+          if (cached != null && !cached.isExpiredAt(now)) {
+            return _castResult<T>(cached.failure);
+          }
           _logger.onMiss(key);
-          return Failure<T>(CacheMissException(key));
-        }
-        if (entry.isExpiredAt(now)) {
-          _logger.onMiss(key);
-          return Failure<T>(CacheExpiredException(key));
+          return entry == null
+              ? Failure<T>(CacheMissException(key))
+              : Failure<T>(CacheExpiredException(key));
         }
         _logger.onHit(key);
         return Success<T>(entry.value as T);
@@ -74,6 +118,8 @@ class Cache {
           persist: false,
           ttl: effectiveTtl,
           source: RefreshSource.policy,
+          retryOptions: effectiveRetry,
+          cacheFailures: false, // networkOnly never caches anything
         );
 
       case CachePolicy.cacheFirst:
@@ -82,6 +128,11 @@ class Cache {
           _logger.onHit(key);
           return Success<T>(entry.value as T);
         }
+        // Check failure cache (serves cached errors when network is unavailable).
+        final cached = _failureCache[key];
+        if (cached != null && !cached.isExpiredAt(now)) {
+          return _castResult<T>(cached.failure);
+        }
         _logger.onMiss(key);
         return _runFetch<T>(
           key,
@@ -89,6 +140,8 @@ class Cache {
           persist: true,
           ttl: effectiveTtl,
           source: RefreshSource.cacheMiss,
+          retryOptions: effectiveRetry,
+          cacheFailures: effectiveCacheFailures,
         );
 
       case CachePolicy.networkFirst:
@@ -98,12 +151,19 @@ class Cache {
           persist: true,
           ttl: effectiveTtl,
           source: RefreshSource.policy,
+          retryOptions: effectiveRetry,
+          cacheFailures: effectiveCacheFailures,
         );
         if (fresh.isSuccess) return fresh;
+        // Fall back to any cached value (success first, then failure).
         final entry = _store.read(key);
         if (entry != null) {
           _logger.onHit(key);
           return Success<T>(entry.value as T);
+        }
+        final cachedFailure = _failureCache[key];
+        if (cachedFailure != null && !cachedFailure.isExpiredAt(now)) {
+          return _castResult<T>(cachedFailure.failure);
         }
         return fresh;
 
@@ -111,10 +171,10 @@ class Cache {
         final entry = _store.read(key);
         if (entry != null) {
           _logger.onHit(key);
-          // Only kick off a background refresh if one isn't already in flight.
-          // Single-flight would dedup it anyway, but skipping the call avoids
-          // an unnecessary microtask round-trip and keeps logs clean.
-          if (!_inflight.containsKey(key)) {
+          final isStale = entry.isExpiredAt(now);
+          // v1.0.2: skip background refresh when entry is fresh, unless
+          // the caller explicitly opts into always-revalidating.
+          if ((isStale || alwaysRevalidate) && !_inflight.containsKey(key)) {
             unawaited(
               _runFetch<T>(
                 key,
@@ -122,6 +182,8 @@ class Cache {
                 persist: true,
                 ttl: effectiveTtl,
                 source: RefreshSource.background,
+                retryOptions: effectiveRetry,
+                cacheFailures: effectiveCacheFailures,
               ),
             );
           }
@@ -134,6 +196,8 @@ class Cache {
           persist: true,
           ttl: effectiveTtl,
           source: RefreshSource.cacheMiss,
+          retryOptions: effectiveRetry,
+          cacheFailures: effectiveCacheFailures,
         );
     }
   }
@@ -143,6 +207,8 @@ class Cache {
     required String key,
     required Fetcher<T> fetch,
     Duration? ttl,
+    RetryOptions? retryOptions,
+    bool? cacheFailures,
   }) =>
       _runFetch<T>(
         key,
@@ -150,6 +216,8 @@ class Cache {
         persist: true,
         ttl: ttl ?? _defaultTtl,
         source: RefreshSource.refresh,
+        retryOptions: retryOptions ?? _defaultRetryOptions,
+        cacheFailures: cacheFailures ?? _defaultCacheFailures,
       );
 
   /// Like [refresh] but framed as a warmup: fetches and caches eagerly so a
@@ -158,6 +226,8 @@ class Cache {
     required String key,
     required Fetcher<T> fetch,
     Duration? ttl,
+    RetryOptions? retryOptions,
+    bool? cacheFailures,
   }) =>
       _runFetch<T>(
         key,
@@ -165,18 +235,21 @@ class Cache {
         persist: true,
         ttl: ttl ?? _defaultTtl,
         source: RefreshSource.prefetch,
+        retryOptions: retryOptions ?? _defaultRetryOptions,
+        cacheFailures: cacheFailures ?? _defaultCacheFailures,
       );
 
-  /// Drops the entry for [key]. Watchers remain subscribed but do not receive
-  /// an emission for the removal.
+  /// Drops the success and failure entries for [key].
   void invalidate(String key) {
     _store.delete(key);
+    _failureCache.remove(key);
     _logger.onInvalidate(key);
   }
 
-  /// Drops every entry from the underlying store.
+  /// Drops every entry from the store and the failure cache.
   void clear() {
     _store.clear();
+    _failureCache.clear();
     _logger.onClear();
   }
 
@@ -206,8 +279,8 @@ class Cache {
     return entry.value as T;
   }
 
-  /// Returns a [CacheState] snapshot describing what the cache currently
-  /// holds for [key]. Never triggers a fetch. New in v1.0.1.
+  /// Returns a [CacheState] snapshot describing what the success cache
+  /// currently holds for [key]. Never triggers a fetch.
   CacheState<T> inspect<T>(String key) {
     final entry = _store.read(key);
     final now = _now();
@@ -221,6 +294,15 @@ class Cache {
       createdAt: entry.createdAt,
       ttl: entry.ttl,
     );
+  }
+
+  /// `true` when [key] has a non-expired cached failure.
+  ///
+  /// Useful for showing an error state in the UI without triggering a fetch.
+  /// New in v1.0.2.
+  bool hasCachedFailure(String key) {
+    final cached = _failureCache[key];
+    return cached != null && !cached.isExpiredAt(_now());
   }
 
   /// Closes any open watcher streams. Safe to call multiple times.
@@ -238,6 +320,8 @@ class Cache {
     required bool persist,
     required Duration? ttl,
     required RefreshSource source,
+    required RetryOptions retryOptions,
+    required bool cacheFailures,
   }) async {
     final existing = _inflight[key];
     if (existing != null) {
@@ -246,13 +330,18 @@ class Cache {
     }
 
     _logger.onRefresh(key, source);
-    final future = _fetchAndStore<T>(key, fetch, persist: persist, ttl: ttl);
+    final future = _fetchAndStore<T>(
+      key,
+      fetch,
+      persist: persist,
+      ttl: ttl,
+      retryOptions: retryOptions,
+      cacheFailures: cacheFailures,
+    );
     _inflight[key] = future;
     try {
       return await future;
     } finally {
-      // Only clear if the entry still points at our future — a re-entrant
-      // fetch may have replaced it.
       if (identical(_inflight[key], future)) {
         _inflight.remove(key);
       }
@@ -264,16 +353,42 @@ class Cache {
     Fetcher<T> fetch, {
     required bool persist,
     required Duration? ttl,
+    required RetryOptions retryOptions,
+    required bool cacheFailures,
   }) async {
-    Result<T> result;
-    try {
-      result = await fetch();
-    } catch (e, st) {
-      result = Failure<T>(e, st);
+    Result<T> result = Failure<T>(StateError('unreachable'));
+    int attempt = 0;
+
+    while (true) {
+      attempt++;
+      try {
+        result = await fetch();
+      } catch (e, st) {
+        result = Failure<T>(e, st);
+      }
+
+      if (result is Success<T>) break;
+
+      final failure = result as Failure<T>;
+      if (!retryOptions.shouldRetry(
+          attempt, failure.error, failure.stackTrace)) {
+        break;
+      }
+
+      if (retryOptions.delay > Duration.zero) {
+        await Future<void>.delayed(retryOptions.delay);
+      }
     }
 
     if (result is Failure<T>) {
       _logger.onError(key, result.error, result.stackTrace);
+      if (persist && cacheFailures) {
+        _failureCache[key] = _CachedFailure(
+          failure: result,
+          createdAt: _now(),
+          ttl: ttl,
+        );
+      }
       return result;
     }
 
@@ -282,6 +397,8 @@ class Cache {
         key,
         CacheEntry<T>(value: result.value, createdAt: _now(), ttl: ttl),
       );
+      // A new success clears any previously cached failure for this key.
+      _failureCache.remove(key);
       _logger.onWrite(key, ttl: ttl);
       _emit<T>(key, result);
     }

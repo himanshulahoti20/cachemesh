@@ -12,3 +12,4 @@ export 'src/cache_state.dart';
 export 'src/cache_store.dart';
 export 'src/memory_cache_store.dart';
 export 'src/result.dart';
+export 'src/retry_options.dart';

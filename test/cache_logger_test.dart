@@ -83,6 +83,7 @@ void main() {
       key: 'k',
       fetch: () async => const Success(2),
       policy: CachePolicy.staleWhileRevalidate,
+      alwaysRevalidate: true,
     );
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);

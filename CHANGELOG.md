@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.2
+
+Smarter Result integration — no breaking changes.
+
+- **Failure-aware caching**: pass `cacheFailures: true` to `Cache` or to individual
+  `get` / `refresh` calls to store failures in the cache (with TTL). The cached
+  failure is returned on the next lookup instead of hitting the network. A
+  successful re-fetch clears the stored failure automatically.
+  `Cache.hasCachedFailure(key)` lets you check the state without fetching.
+- **Retry hooks**: new `RetryOptions` type (`maxAttempts`, `retryWhen`, `delay`).
+  Set a cache-wide default via `Cache(retryOptions: ...)` and override per call.
+  `RetryOptions.noRetry` (single attempt) is the default, so existing code is
+  unaffected. Built-in `retryWhen` predicate pattern makes it easy to skip
+  retries on specific error types (e.g. auth errors).
+- **Smarter SWR revalidation**: `staleWhileRevalidate` now only kicks off a
+  background refresh when the cached entry is actually stale. Pass
+  `alwaysRevalidate: true` to restore the pre-1.0.2 behaviour.
+- **Cleaner failure propagation**: returned `Failure` and thrown exceptions both
+  flow through the same retry loop and `CacheLogger.onError` call; the original
+  error type and stack trace are preserved throughout.
+
 ## 1.0.1
 
 Stability & observability — no breaking changes.
