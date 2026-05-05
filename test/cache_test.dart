@@ -180,10 +180,12 @@ void main() {
         policy: CachePolicy.cacheFirst,
       );
       // Now there's a cached value of 1 with 1 fetch consumed.
+      // alwaysRevalidate: true exercises the "refresh even when fresh" path.
       final r = await cache.get<int>(
         key: 'k',
         fetch: counter.success(2),
         policy: CachePolicy.staleWhileRevalidate,
+        alwaysRevalidate: true,
       );
       expect(r, const Success<int>(1));
 
@@ -282,6 +284,7 @@ void main() {
         key: 'k',
         fetch: counter.success(2),
         policy: CachePolicy.staleWhileRevalidate,
+        alwaysRevalidate: true,
       );
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);

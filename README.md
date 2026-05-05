@@ -1,5 +1,11 @@
 # cachemesh
 
+[![pub version](https://img.shields.io/pub/v/cachemesh.svg)](https://pub.dev/packages/cachemesh)
+[![pub points](https://img.shields.io/pub/points/cachemesh)](https://pub.dev/packages/cachemesh/score)
+[![pub likes](https://img.shields.io/pub/likes/cachemesh)](https://pub.dev/packages/cachemesh/score)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![CI](https://github.com/himanshulahoti20/cachemesh/actions/workflows/dart_ci.yml/badge.svg?branch=main&cache_bust=1)
+
 **Cache smarter. Orchestrate data. Stay fast.**
 
 A `Result`-first caching and data orchestration layer for Dart & Flutter apps.
@@ -22,7 +28,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^1.0.1
+  cachemesh: ^1.0.2
 ```
 
 ## Quick start
@@ -121,6 +127,63 @@ Override `CacheLogger`'s methods to ship events to your own logging stack.
 Each refresh comes with a `RefreshSource` (`cacheMiss`, `policy`,
 `background`, `refresh`, `prefetch`) so you can filter the noisy ones.
 
+## Retry hooks *(v1.0.2)*
+
+```dart
+final cache = Cache(
+  // Cache-wide default: retry up to 3 times on any failure.
+  retryOptions: const RetryOptions(maxAttempts: 3),
+);
+
+// Per-call override: skip retries on auth errors.
+await cache.get<User>(
+  key: 'user:42',
+  fetch: fetchUser,
+  retryOptions: RetryOptions(
+    maxAttempts: 3,
+    retryWhen: (e, _) => e is! UnauthorizedException,
+    delay: const Duration(milliseconds: 200),
+  ),
+);
+```
+
+`RetryOptions.noRetry` (single attempt, no delay) is the default — existing
+code is unaffected.
+
+## Failure-aware caching *(v1.0.2)*
+
+```dart
+// Cache a rate-limit failure for 30 s to avoid hammering the API.
+await cache.get<Feed>(
+  key: 'feed',
+  fetch: fetchFeed,
+  policy: CachePolicy.cacheFirst,
+  cacheFailures: true,
+  ttl: const Duration(seconds: 30),
+);
+
+// Check state without triggering a fetch.
+if (cache.hasCachedFailure('feed')) showErrorBanner();
+```
+
+A successful re-fetch automatically clears the cached failure. `invalidate`
+and `clear` also remove failure entries.
+
+## Smarter SWR *(v1.0.2)*
+
+`staleWhileRevalidate` now only kicks off a background refresh when the entry
+is **stale**. Fresh entries are served without network traffic. Pass
+`alwaysRevalidate: true` to refresh even when fresh:
+
+```dart
+await cache.get<Feed>(
+  key: 'feed',
+  fetch: fetchFeed,
+  policy: CachePolicy.staleWhileRevalidate,
+  alwaysRevalidate: true,
+);
+```
+
 ## Cache state insights *(v1.0.1)*
 
 ```dart
@@ -137,10 +200,17 @@ state.expiresAt;    // null if no TTL
 ## Roadmap
 
 - **1.0.1** ✅ — pluggable logger, cache state insights, safer expiry.
-- **1.0.2** — failure-aware caching, retry hooks.
+- **1.0.2** ✅ — failure-aware caching, retry hooks, smarter SWR.
 - **1.1.0** — `resilify` & `token_keeper` integration, cache scopes.
 - **1.2.0** — disk adapters, hydration, offline-first.
 - **2.0.0** — unified data engine + reactive data graph.
+
+## ❤️ Support
+
+If you find this package helpful, consider supporting:
+
+👉 https://github.com/sponsors/himanshulahoti20
+
 
 ## License
 
