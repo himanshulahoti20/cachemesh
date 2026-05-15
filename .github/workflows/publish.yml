@@ -37,7 +37,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
-      - run: dart pub get
+
+      - name: Get dependencies
+        run: dart pub get
+
+      - name: Analyze (VERY important for score)
+        run: dart analyze
+
       - name: Run tests
         run: dart test
-      - run: dart pub publish --force
+
+      - name: Ensure pub outdated JSON works (CRITICAL)
+        run: dart pub outdated --json > /dev/null
+
+      - name: Dry run publish
+        run: dart pub publish --dry-run
+
+      - name: Publish
+        run: dart pub publish --force
