@@ -85,8 +85,11 @@ void main() {
 
       cache.setActiveUser('bob');
       expect(cache.activeUserId, 'bob');
-      expect(cache.peek<int>('profile'), isNull,
-          reason: 'alice\'s data must not be visible after switch');
+      expect(
+        cache.peek<int>('profile'),
+        isNull,
+        reason: 'alice\'s data must not be visible after switch',
+      );
     });
 
     test('setActiveUser is a no-op when the user does not change', () async {
@@ -165,20 +168,22 @@ void main() {
   });
 
   group('failure caching respects scope', () {
-    test('cached failures under session scope are cleared by endSession',
-        () async {
-      await cache.get<int>(
-        key: 'k',
-        fetch: () async => Failure<int>('boom'),
-        policy: CachePolicy.cacheFirst,
-        cacheFailures: true,
-        scope: CacheScope.session,
-      );
-      expect(cache.hasCachedFailure('k'), isTrue);
+    test(
+      'cached failures under session scope are cleared by endSession',
+      () async {
+        await cache.get<int>(
+          key: 'k',
+          fetch: () async => Failure<int>('boom'),
+          policy: CachePolicy.cacheFirst,
+          cacheFailures: true,
+          scope: CacheScope.session,
+        );
+        expect(cache.hasCachedFailure('k'), isTrue);
 
-      cache.endSession();
-      expect(cache.hasCachedFailure('k'), isFalse);
-    });
+        cache.endSession();
+        expect(cache.hasCachedFailure('k'), isFalse);
+      },
+    );
   });
 }
 

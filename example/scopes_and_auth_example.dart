@@ -95,9 +95,11 @@ Future<void> main() async {
   cache.setActiveUser('bob');
   print('peek me (should be null): ${cache.peek<Map<String, String>>('me')}');
   print(
-      'peek feed (session — still there): ${cache.peek<List<String>>('feed')}');
+    'peek feed (session — still there): ${cache.peek<List<String>>('feed')}',
+  );
   print(
-      'peek config (global — still there): ${cache.peek<String>('app:config')}');
+    'peek config (global — still there): ${cache.peek<String>('app:config')}',
+  );
 
   print('\n=== bob fetches his own profile ===');
   final me3 = await cache.getAuthenticated<Map<String, String>>(

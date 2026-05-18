@@ -67,68 +67,74 @@ void main() {
       await cache.dispose();
     });
 
-    test('caches successful authenticated reads under user scope by default',
-        () async {
-      final keeper = _FakeTokenKeeper(token: 'tok');
-      final cache = Cache(tokenKeeper: keeper);
-      cache.setActiveUser('alice');
+    test(
+      'caches successful authenticated reads under user scope by default',
+      () async {
+        final keeper = _FakeTokenKeeper(token: 'tok');
+        final cache = Cache(tokenKeeper: keeper);
+        cache.setActiveUser('alice');
 
-      int actionCalls = 0;
-      Future<Result<int>> action(String token) async {
-        actionCalls++;
-        return const Success(1);
-      }
-
-      await cache.getAuthenticated<int>(key: 'me', fetch: action);
-      await cache.getAuthenticated<int>(key: 'me', fetch: action);
-
-      expect(actionCalls, 1, reason: 'second call should be a cache hit');
-      expect(cache.scopeOf('me'), CacheScope.user);
-      await cache.dispose();
-    });
-
-    test('switching user clears authenticated entries from previous user',
-        () async {
-      final keeper = _FakeTokenKeeper(token: 'tok-alice');
-      final cache = Cache(tokenKeeper: keeper);
-      cache.setActiveUser('alice');
-
-      await cache.getAuthenticated<int>(
-        key: 'me',
-        fetch: (_) async => const Success(1),
-      );
-      expect(cache.peek<int>('me'), 1);
-
-      cache.setActiveUser('bob');
-      expect(cache.peek<int>('me'), isNull);
-      await cache.dispose();
-    });
-
-    test('TokenKeeperAdapter is responsible for the retry-on-unauthorized loop',
-        () async {
-      final keeper = _FakeTokenKeeper(
-        token: 'stale',
-        refreshedToken: 'fresh',
-        simulateUnauthorizedOnce: true,
-      );
-      final cache = Cache(tokenKeeper: keeper);
-      cache.setActiveUser('alice');
-
-      int actionCalls = 0;
-      final r = await cache.getAuthenticated<String>(
-        key: 'me',
-        fetch: (token) async {
+        int actionCalls = 0;
+        Future<Result<int>> action(String token) async {
           actionCalls++;
-          if (token == 'stale') return Failure<String>(const _Unauthorized());
-          return Success<String>('ok($token)');
-        },
-      );
+          return const Success(1);
+        }
 
-      expect(r, const Success<String>('ok(fresh)'));
-      expect(actionCalls, 2);
-      expect(keeper.tokensSeen, ['stale', 'fresh']);
-      await cache.dispose();
-    });
+        await cache.getAuthenticated<int>(key: 'me', fetch: action);
+        await cache.getAuthenticated<int>(key: 'me', fetch: action);
+
+        expect(actionCalls, 1, reason: 'second call should be a cache hit');
+        expect(cache.scopeOf('me'), CacheScope.user);
+        await cache.dispose();
+      },
+    );
+
+    test(
+      'switching user clears authenticated entries from previous user',
+      () async {
+        final keeper = _FakeTokenKeeper(token: 'tok-alice');
+        final cache = Cache(tokenKeeper: keeper);
+        cache.setActiveUser('alice');
+
+        await cache.getAuthenticated<int>(
+          key: 'me',
+          fetch: (_) async => const Success(1),
+        );
+        expect(cache.peek<int>('me'), 1);
+
+        cache.setActiveUser('bob');
+        expect(cache.peek<int>('me'), isNull);
+        await cache.dispose();
+      },
+    );
+
+    test(
+      'TokenKeeperAdapter is responsible for the retry-on-unauthorized loop',
+      () async {
+        final keeper = _FakeTokenKeeper(
+          token: 'stale',
+          refreshedToken: 'fresh',
+          simulateUnauthorizedOnce: true,
+        );
+        final cache = Cache(tokenKeeper: keeper);
+        cache.setActiveUser('alice');
+
+        int actionCalls = 0;
+        final r = await cache.getAuthenticated<String>(
+          key: 'me',
+          fetch: (token) async {
+            actionCalls++;
+            if (token == 'stale') return Failure<String>(const _Unauthorized());
+            return Success<String>('ok($token)');
+          },
+        );
+
+        expect(r, const Success<String>('ok(fresh)'));
+        expect(actionCalls, 2);
+        expect(keeper.tokensSeen, ['stale', 'fresh']);
+        await cache.dispose();
+      },
+    );
 
     test('caller can override the default user scope', () async {
       final keeper = _FakeTokenKeeper(token: 'tok');
@@ -143,8 +149,11 @@ void main() {
       );
 
       cache.setActiveUser('bob');
-      expect(cache.peek<int>('app-status'), 1,
-          reason: 'session-scoped entries survive a user switch');
+      expect(
+        cache.peek<int>('app-status'),
+        1,
+        reason: 'session-scoped entries survive a user switch',
+      );
       await cache.dispose();
     });
   });

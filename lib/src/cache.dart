@@ -20,11 +20,7 @@ typedef Fetcher<T> = Future<Result<T>> Function();
 
 /// Stores a cached [Failure] alongside its TTL bookkeeping.
 class _CachedFailure {
-  _CachedFailure({
-    required this.failure,
-    required this.createdAt,
-    this.ttl,
-  });
+  _CachedFailure({required this.failure, required this.createdAt, this.ttl});
 
   final Failure<dynamic> failure;
   final DateTime createdAt;
@@ -558,7 +554,10 @@ class Cache {
 
       final failure = result as Failure<T>;
       if (!retryOptions.shouldRetry(
-          attempt, failure.error, failure.stackTrace)) {
+        attempt,
+        failure.error,
+        failure.stackTrace,
+      )) {
         break;
       }
 

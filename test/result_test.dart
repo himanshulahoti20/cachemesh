@@ -22,10 +22,14 @@ void main() {
     test('fold dispatches to the right branch', () {
       const ok = Success<int>(7);
       final bad = Failure<int>('nope');
-      expect(ok.fold(onSuccess: (v) => 'v=$v', onFailure: (_, __) => 'err'),
-          'v=7');
-      expect(bad.fold(onSuccess: (v) => 'v=$v', onFailure: (e, _) => 'err=$e'),
-          'err=nope');
+      expect(
+        ok.fold(onSuccess: (v) => 'v=$v', onFailure: (_, __) => 'err'),
+        'v=7',
+      );
+      expect(
+        bad.fold(onSuccess: (v) => 'v=$v', onFailure: (e, _) => 'err=$e'),
+        'err=nope',
+      );
     });
 
     test('map transforms success and passes failure through', () {

@@ -172,41 +172,45 @@ void main() {
   });
 
   group('staleWhileRevalidate', () {
-    test('returns cached immediately and refreshes in the background',
-        () async {
-      await cache.get<int>(
-        key: 'k',
-        fetch: counter.success(1),
-        policy: CachePolicy.cacheFirst,
-      );
-      // Now there's a cached value of 1 with 1 fetch consumed.
-      // alwaysRevalidate: true exercises the "refresh even when fresh" path.
-      final r = await cache.get<int>(
-        key: 'k',
-        fetch: counter.success(2),
-        policy: CachePolicy.staleWhileRevalidate,
-        alwaysRevalidate: true,
-      );
-      expect(r, const Success<int>(1));
+    test(
+      'returns cached immediately and refreshes in the background',
+      () async {
+        await cache.get<int>(
+          key: 'k',
+          fetch: counter.success(1),
+          policy: CachePolicy.cacheFirst,
+        );
+        // Now there's a cached value of 1 with 1 fetch consumed.
+        // alwaysRevalidate: true exercises the "refresh even when fresh" path.
+        final r = await cache.get<int>(
+          key: 'k',
+          fetch: counter.success(2),
+          policy: CachePolicy.staleWhileRevalidate,
+          alwaysRevalidate: true,
+        );
+        expect(r, const Success<int>(1));
 
-      // Let the background refresh complete.
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
+        // Let the background refresh complete.
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
 
-      expect(counter.calls, 2);
-      expect(cache.peek<int>('k'), 2);
-    });
+        expect(counter.calls, 2);
+        expect(cache.peek<int>('k'), 2);
+      },
+    );
 
-    test('no cached value => fetches and returns synchronously-awaited result',
-        () async {
-      final r = await cache.get<int>(
-        key: 'k',
-        fetch: counter.success(5),
-        policy: CachePolicy.staleWhileRevalidate,
-      );
-      expect(r, const Success<int>(5));
-      expect(counter.calls, 1);
-    });
+    test(
+      'no cached value => fetches and returns synchronously-awaited result',
+      () async {
+        final r = await cache.get<int>(
+          key: 'k',
+          fetch: counter.success(5),
+          policy: CachePolicy.staleWhileRevalidate,
+        );
+        expect(r, const Success<int>(5));
+        expect(counter.calls, 1);
+      },
+    );
 
     test('serves stale (expired) value immediately', () async {
       await cache.get<int>(
@@ -338,10 +342,7 @@ void main() {
         fetch: counter.success(1),
         policy: CachePolicy.cacheFirst,
       );
-      final r = await cache.refresh<int>(
-        key: 'k',
-        fetch: counter.success(2),
-      );
+      final r = await cache.refresh<int>(key: 'k', fetch: counter.success(2));
       expect(r, const Success<int>(2));
       expect(cache.peek<int>('k'), 2);
       expect(counter.calls, 2);
