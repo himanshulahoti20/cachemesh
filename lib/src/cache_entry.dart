@@ -1,11 +1,7 @@
 /// A value stored in the cache together with the metadata needed to decide
 /// whether it is still fresh.
 class CacheEntry<T> {
-  CacheEntry({
-    required this.value,
-    required this.createdAt,
-    this.ttl,
-  });
+  CacheEntry({required this.value, required this.createdAt, this.ttl});
 
   /// The cached value.
   final T value;

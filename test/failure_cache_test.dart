@@ -43,34 +43,36 @@ void main() {
   });
 
   group('cacheFailures: true', () {
-    test('failure is stored; subsequent cacheFirst get returns cached failure',
-        () async {
-      int calls = 0;
-      final r1 = await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return Failure<int>('rate-limited');
-        },
-        policy: CachePolicy.cacheFirst,
-        cacheFailures: true,
-        ttl: const Duration(minutes: 1),
-      );
-      final r2 = await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return Failure<int>('should not reach');
-        },
-        policy: CachePolicy.cacheFirst,
-        cacheFailures: true,
-      );
-      expect(r1.isFailure, isTrue);
-      expect(r2.isFailure, isTrue);
-      expect((r2 as Failure<int>).error, 'rate-limited');
-      expect(calls, 1);
-      expect(cache.hasCachedFailure('k'), isTrue);
-    });
+    test(
+      'failure is stored; subsequent cacheFirst get returns cached failure',
+      () async {
+        int calls = 0;
+        final r1 = await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return Failure<int>('rate-limited');
+          },
+          policy: CachePolicy.cacheFirst,
+          cacheFailures: true,
+          ttl: const Duration(minutes: 1),
+        );
+        final r2 = await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return Failure<int>('should not reach');
+          },
+          policy: CachePolicy.cacheFirst,
+          cacheFailures: true,
+        );
+        expect(r1.isFailure, isTrue);
+        expect(r2.isFailure, isTrue);
+        expect((r2 as Failure<int>).error, 'rate-limited');
+        expect(calls, 1);
+        expect(cache.hasCachedFailure('k'), isTrue);
+      },
+    );
 
     test('cached failure respects TTL; re-fetches after expiry', () async {
       int calls = 0;
@@ -220,32 +222,34 @@ void main() {
   });
 
   group('SWR: smarter stale-only revalidation (v1.0.2)', () {
-    test('fresh entry does NOT trigger background refresh by default',
-        () async {
-      int calls = 0;
-      await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return const Success<int>(1);
-        },
-        policy: CachePolicy.cacheFirst,
-        ttl: const Duration(minutes: 5),
-      );
-      // Entry is still fresh — SWR should not refresh.
-      await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return const Success<int>(2);
-        },
-        policy: CachePolicy.staleWhileRevalidate,
-        ttl: const Duration(minutes: 5),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(calls, 1);
-      expect(cache.peek<int>('k'), 1);
-    });
+    test(
+      'fresh entry does NOT trigger background refresh by default',
+      () async {
+        int calls = 0;
+        await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return const Success<int>(1);
+          },
+          policy: CachePolicy.cacheFirst,
+          ttl: const Duration(minutes: 5),
+        );
+        // Entry is still fresh — SWR should not refresh.
+        await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return const Success<int>(2);
+          },
+          policy: CachePolicy.staleWhileRevalidate,
+          ttl: const Duration(minutes: 5),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(calls, 1);
+        expect(cache.peek<int>('k'), 1);
+      },
+    );
 
     test('stale entry triggers background refresh', () async {
       int calls = 0;
@@ -274,32 +278,34 @@ void main() {
       expect(cache.peek<int>('k'), 2);
     });
 
-    test('alwaysRevalidate: true restores old always-refresh behaviour',
-        () async {
-      int calls = 0;
-      await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return const Success<int>(1);
-        },
-        policy: CachePolicy.cacheFirst,
-        ttl: const Duration(minutes: 5),
-      );
-      // Entry is fresh, but caller requests always-revalidate.
-      await cache.get<int>(
-        key: 'k',
-        fetch: () async {
-          calls++;
-          return const Success<int>(2);
-        },
-        policy: CachePolicy.staleWhileRevalidate,
-        ttl: const Duration(minutes: 5),
-        alwaysRevalidate: true,
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(calls, 2);
-      expect(cache.peek<int>('k'), 2);
-    });
+    test(
+      'alwaysRevalidate: true restores old always-refresh behaviour',
+      () async {
+        int calls = 0;
+        await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return const Success<int>(1);
+          },
+          policy: CachePolicy.cacheFirst,
+          ttl: const Duration(minutes: 5),
+        );
+        // Entry is fresh, but caller requests always-revalidate.
+        await cache.get<int>(
+          key: 'k',
+          fetch: () async {
+            calls++;
+            return const Success<int>(2);
+          },
+          policy: CachePolicy.staleWhileRevalidate,
+          ttl: const Duration(minutes: 5),
+          alwaysRevalidate: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(calls, 2);
+        expect(cache.peek<int>('k'), 2);
+      },
+    );
   });
 }

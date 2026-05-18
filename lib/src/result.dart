@@ -45,8 +45,10 @@ sealed class Result<T> {
   /// Maps a [Success] value through [transform]; passes [Failure] through unchanged.
   Result<R> map<R>(R Function(T value) transform) => switch (this) {
         Success<T>(:final value) => Success<R>(transform(value)),
-        Failure<T>(:final error, :final stackTrace) =>
-          Failure<R>(error, stackTrace),
+        Failure<T>(:final error, :final stackTrace) => Failure<R>(
+            error,
+            stackTrace,
+          ),
       };
 }
 

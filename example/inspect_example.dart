@@ -28,9 +28,11 @@ Future<void> main() async {
   await Future<void>.delayed(const Duration(milliseconds: 80));
   final stale = cache.inspect<String>('user:1');
   describe('past ttl', stale);
-  print('stale.isStale=${stale.isStale}, '
-      'value=${stale.value}, '
-      'expired ${stale.timeToExpiry!.abs().inMilliseconds}ms ago');
+  print(
+    'stale.isStale=${stale.isStale}, '
+    'value=${stale.value}, '
+    'expired ${stale.timeToExpiry!.abs().inMilliseconds}ms ago',
+  );
 
   await cache.dispose();
 }

@@ -54,12 +54,7 @@ void main() {
       fetch: () async => const Success(2),
       policy: CachePolicy.cacheFirst,
     );
-    expect(log.events, [
-      'miss:k',
-      'refresh:k:cacheMiss',
-      'write:k',
-      'hit:k',
-    ]);
+    expect(log.events, ['miss:k', 'refresh:k:cacheMiss', 'write:k', 'hit:k']);
   });
 
   test('networkFirst: refresh + write on success', () async {
@@ -88,11 +83,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);
 
-    expect(log.events, [
-      'hit:k',
-      'refresh:k:background',
-      'write:k',
-    ]);
+    expect(log.events, ['hit:k', 'refresh:k:background', 'write:k']);
   });
 
   test('failure surfaces an error event but no write', () async {

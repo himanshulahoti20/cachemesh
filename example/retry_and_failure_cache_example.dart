@@ -147,9 +147,7 @@ Future<void> _demoRetryWithFailureCache() async {
     cacheFailures: true,
     retryOptions: const RetryOptions(maxAttempts: 3),
   );
-  print(
-    'r2: ${r2.errorOrNull}  (api calls: ${api.totalCalls}, still 3)',
-  );
+  print('r2: ${r2.errorOrNull}  (api calls: ${api.totalCalls}, still 3)');
 
   await cache.dispose();
 }

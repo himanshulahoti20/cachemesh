@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.1.0
+
+Ecosystem integration — no breaking changes.
+
+- **`ResilifySource<T>` typedef**: alias for `Fetcher<T>` so resilify pipelines
+  read naturally at call sites. Any function returning `Future<Result<T>>`
+  plugs straight into `Cache.get` — no manual try/catch wrapping required.
+- **`TokenKeeperAdapter` interface**: bridges `token_keeper`'s
+  `withValidToken` flow into the cache. Pass an adapter via
+  `Cache(tokenKeeper: ...)` and use the new `Cache.getAuthenticated`
+  method — fetchers receive a valid token and the adapter is responsible for
+  refreshing on unauthorized once.
+- **Cache scopes**: new `CacheScope` enum (`global` / `session` / `user`).
+  `Cache.get`, `refresh`, and `prefetch` accept an optional `scope:`.
+  `Cache.scopeOf(key)` reports the recorded scope. User-scoped reads require
+  `Cache.setActiveUser(id)` to be called first.
+- **Auto invalidation hooks**:
+  - `Cache.setActiveUser(userId)` — clears entries belonging to the previous
+    user when the active user changes; no-op if unchanged.
+  - `Cache.endSession()` — drops both session- and user-scoped entries and
+    unsets the active user. Call from your logout flow.
+  - `Cache.clearScope(scope)` — fine-grained, drop a single scope.
+- **`CacheLogger.onScopeCleared`**: new lifecycle event with the reason
+  (`setActiveUser`, `endSession`, `clearScope:<name>`) and the list of
+  removed keys. Only fires when there is at least one key to report.
+- `Cache.invalidate` and `Cache.clear` now also clean up scope bookkeeping.
+
 ## 1.0.2
 
 Smarter Result integration — no breaking changes.

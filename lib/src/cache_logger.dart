@@ -47,6 +47,12 @@ class CacheLogger {
 
   /// A fetcher returned a `Failure` or threw.
   void onError(String key, Object error, StackTrace? stackTrace) {}
+
+  /// A scope-clearing lifecycle event ran (e.g. `endSession`,
+  /// `setActiveUser`, `clearScope`) and removed [removedKeys].
+  ///
+  /// New in v1.1.0.
+  void onScopeCleared(String reason, List<String> removedKeys) {}
 }
 
 /// Convenience [CacheLogger] that prints every event to stdout.
@@ -85,4 +91,8 @@ class PrintCacheLogger extends CacheLogger {
   @override
   void onError(String key, Object error, StackTrace? stackTrace) =>
       _log('error $key: $error');
+
+  @override
+  void onScopeCleared(String reason, List<String> removedKeys) =>
+      _log('scope-cleared $reason removed=${removedKeys.length}');
 }

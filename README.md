@@ -28,7 +28,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^1.0.2
+  cachemesh: ^1.1.0
 ```
 
 ## Quick start
@@ -197,11 +197,94 @@ state.timeToExpiry; // negative if past TTL
 state.expiresAt;    // null if no TTL
 ```
 
+## Ecosystem integration *(v1.1.0)*
+
+### Resilify
+
+`resilify` already returns `Future<Result<T>>`, so any resilify pipeline plugs
+straight into the cache — no wrapping. The `ResilifySource<T>` typedef is just
+a self-documenting alias for `Fetcher<T>`:
+
+```dart
+final api = ResilifyApi(...);
+
+// Use as a regular fetcher:
+await cache.get<User>(
+  key: 'user:1',
+  fetch: () => api.fetchUser(1),
+  policy: CachePolicy.staleWhileRevalidate,
+);
+```
+
+### Token-aware fetching with `token_keeper`
+
+Wire `token_keeper`'s `withValidToken` into the cache by implementing
+`TokenKeeperAdapter`. `Cache.getAuthenticated` passes a valid token to the
+fetcher; the adapter is responsible for refreshing on unauthorized once.
+
+```dart
+class MyTokenKeeperAdapter implements TokenKeeperAdapter {
+  MyTokenKeeperAdapter(this.keeper);
+  final TokenKeeper keeper;
+
+  @override
+  Future<Result<T>> withValidToken<T>(AuthenticatedAction<T> action) =>
+      keeper.withValidToken(action); // delegate to your real keeper
+}
+
+final cache = Cache(tokenKeeper: MyTokenKeeperAdapter(myKeeper));
+
+final me = await cache.getAuthenticated<User>(
+  key: 'me',
+  fetch: (token) => api.me(token), // already returns Future<Result<User>>
+);
+```
+
+`getAuthenticated` defaults to `CacheScope.user` so a user switch
+automatically wipes per-user data.
+
+### Cache scopes & lifecycle
+
+```dart
+enum CacheScope { global, session, user }
+```
+
+| Scope | When it's cleared |
+| --- | --- |
+| `global` | Only by explicit `invalidate` / `clear`. |
+| `session` | On `endSession()`. |
+| `user` | On `setActiveUser(otherId)` or `endSession()`. Requires an active user. |
+
+```dart
+cache.setActiveUser('alice');
+
+await cache.get<User>(
+  key: 'me',
+  fetch: fetchMe,
+  scope: CacheScope.user,
+);
+await cache.get<Feed>(
+  key: 'home-feed',
+  fetch: fetchFeed,
+  scope: CacheScope.session,
+);
+
+// Login flow: switching users wipes alice's data, keeps app-wide globals.
+cache.setActiveUser('bob');
+
+// Logout flow: wipes session + user data, keeps globals.
+cache.endSession();
+
+// Fine-grained:
+cache.clearScope(CacheScope.session);
+cache.scopeOf('me'); // => CacheScope.user
+```
+
 ## Roadmap
 
 - **1.0.1** ✅ — pluggable logger, cache state insights, safer expiry.
 - **1.0.2** ✅ — failure-aware caching, retry hooks, smarter SWR.
-- **1.1.0** — `resilify` & `token_keeper` integration, cache scopes.
+- **1.1.0** ✅ — resilify & token_keeper integration, cache scopes.
 - **1.2.0** — disk adapters, hydration, offline-first.
 - **2.0.0** — unified data engine + reactive data graph.
 
