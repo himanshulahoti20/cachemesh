@@ -52,6 +52,5 @@ class PersistedRecord {
   }
 
   @override
-  String toString() =>
-      'PersistedRecord($key, scope: $scope, ttlMs: $ttlMs)';
+  String toString() => 'PersistedRecord($key, scope: $scope, ttlMs: $ttlMs)';
 }

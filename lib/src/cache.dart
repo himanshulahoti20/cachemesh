@@ -661,11 +661,13 @@ class Cache {
   /// funnels any failure to [CacheLogger.onError] instead of going unhandled.
   void _track(Future<void> op) {
     late final Future<void> wrapped;
-    wrapped = op.then(
-      (_) {},
-      onError: (Object e, StackTrace st) =>
-          _logger.onError('<persistence>', e, st),
-    ).whenComplete(() => _pendingPersistence.remove(wrapped));
+    wrapped = op
+        .then(
+          (_) {},
+          onError: (Object e, StackTrace st) =>
+              _logger.onError('<persistence>', e, st),
+        )
+        .whenComplete(() => _pendingPersistence.remove(wrapped));
     _pendingPersistence.add(wrapped);
   }
 
