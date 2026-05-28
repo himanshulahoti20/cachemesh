@@ -6,6 +6,10 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![CI](https://github.com/himanshulahoti20/cachemesh/actions/workflows/dart_ci.yml/badge.svg?branch=main&cache_bust=1)
 
+[![Flutter ≥3.10](https://img.shields.io/badge/flutter-%E2%89%A53.10-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
+[![Dart ≥3.5](https://img.shields.io/badge/dart-%E2%89%A53.3-0175C2?logo=dart&logoColor=white)](https://dart.dev)
+[![platforms](https://img.shields.io/badge/platform-android%20%7C%20ios%20%7C%20macos%20%7C%20web%20%7C%20linux%20%7C%20windows-lightgrey)](https://pub.dev/packages/token_keeper)
+
 **Cache smarter. Orchestrate data. Stay fast.**
 
 A `Result`-first caching and data orchestration layer for Dart & Flutter apps.
@@ -28,7 +32,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^1.1.0
+  cachemesh: ^1.2.0
 ```
 
 ## Quick start
@@ -280,12 +284,61 @@ cache.clearScope(CacheScope.session);
 cache.scopeOf('me'); // => CacheScope.user
 ```
 
+## Persistence & offline-first *(v1.2.0)*
+
+Make the cache survive app restarts. Plug in a `PersistentStore`, register a
+`CacheCodec<T>` per key-prefix, and `hydrate()` on startup.
+
+```dart
+import 'package:cachemesh/cachemesh.dart';
+import 'package:cachemesh/cachemesh_io.dart'; // JsonFileStore (dart:io)
+
+final cache = Cache(
+  persistentStore: JsonFileStore.atPath('/path/to/cache.json'),
+);
+
+// Teach the cache how to (de)serialize values under the 'user:' prefix.
+cache.registerCodec<User>(
+  'user:',
+  CacheCodec(
+    encode: (u) => u.toJson(),
+    decode: (j) => User.fromJson(j as Map<String, dynamic>),
+  ),
+);
+
+// On startup — restore cached data instantly (expired entries are pruned).
+final restored = await cache.hydrate();
+
+// Reads/writes work as usual; successful writes are persisted in the
+// background. Only keys with a registered codec are written to disk.
+await cache.get<User>(
+  key: 'user:1',
+  fetch: () => api.fetchUser(1),
+  policy: CachePolicy.networkFirst, // offline-first: fall back to cache
+);
+
+await cache.flush(); // optional durability checkpoint (e.g. on app pause)
+```
+
+Bring your own backend by implementing `PersistentStore` (Hive, sqflite,
+`shared_preferences`, …). `InMemoryPersistentStore` is provided for tests.
+
+### Cache metrics *(v1.2.0)*
+
+```dart
+final m = cache.metrics;
+print(m);          // CacheMetrics(hits: 12, misses: 3, ... hitRate: 80.0%)
+m.hitRate;         // 0.0–1.0
+m.lookups;         // hits + misses
+cache.resetMetrics();
+```
+
 ## Roadmap
 
 - **1.0.1** ✅ — pluggable logger, cache state insights, safer expiry.
 - **1.0.2** ✅ — failure-aware caching, retry hooks, smarter SWR.
 - **1.1.0** ✅ — resilify & token_keeper integration, cache scopes.
-- **1.2.0** — disk adapters, hydration, offline-first.
+- **1.2.0** ✅ — disk adapters, hydration, offline-first, metrics.
 - **2.0.0** — unified data engine + reactive data graph.
 
 ## ❤️ Support
