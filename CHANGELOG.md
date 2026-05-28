@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.0
+
+Persistence & offline support — no breaking changes.
+
+- **Pluggable disk persistence**: new `PersistentStore` async interface plus
+  two implementations — `InMemoryPersistentStore` (tests/demos) and
+  `JsonFileStore` (file-backed, `dart:io`). `JsonFileStore` lives in a separate
+  entry point, `package:cachemesh/cachemesh_io.dart`, so the core library stays
+  web-compatible. Bring your own backend (Hive, sqflite, shared_preferences) by
+  implementing `PersistentStore`.
+- **Typed serialization**: register a `CacheCodec<T>` per key-prefix via
+  `Cache.registerCodec`. Only keys with a matching codec are persisted; the
+  longest matching prefix wins. Write-through is fire-and-forget and never
+  blocks the read path — call `Cache.flush()` for a durability checkpoint.
+- **Hydration**: `Cache.hydrate()` restores persisted entries into memory at
+  startup, skipping (and pruning) expired records. User-scoped records remember
+  their owner, so a later `setActiveUser` correctly clears another account's
+  restored data.
+- **Offline-first**: persistence + `CachePolicy.networkFirst` (fall back to
+  cache on failure) + `cacheFailures` gives restart-safe, network-tolerant
+  reads. See `example/persistence_offline_example.dart`.
+- **Cache metrics**: `Cache.metrics` exposes a `CacheMetrics` snapshot
+  (hits, misses, writes, refreshes, errors, evictions, plus `lookups` and
+  `hitRate`). `Cache.resetMetrics()` zeroes the counters.
+- `Cache.invalidate` / `clear` now propagate to the persistent store, and
+  `Cache.isPersistent` reports whether a store is configured.
+- **Behaviour refinement**: `setActiveUser` now clears user-scoped entries that
+  don't belong to the incoming user (previously only the immediately-preceding
+  user). This is strictly safer and makes multi-account hydration correct.
+
 ## 1.1.0
 
 Ecosystem integration — no breaking changes.

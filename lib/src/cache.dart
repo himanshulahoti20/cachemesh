@@ -1,13 +1,17 @@
 import 'dart:async';
 
+import 'cache_codec.dart';
 import 'cache_entry.dart';
 import 'cache_exception.dart';
 import 'cache_logger.dart';
+import 'cache_metrics.dart';
 import 'cache_policy.dart';
 import 'cache_scope.dart';
 import 'cache_state.dart';
 import 'cache_store.dart';
 import 'memory_cache_store.dart';
+import 'persisted_record.dart';
+import 'persistent_store.dart';
 import 'result.dart';
 import 'retry_options.dart';
 import 'token_keeper.dart';
@@ -43,8 +47,10 @@ class _ScopeMeta {
 /// The unified cache + data orchestration entry point.
 ///
 /// One [Cache] manages a keyed [CacheStore], coordinates concurrent fetches
-/// (single-flight), broadcasts updates to [watch] subscribers, and (v1.1.0)
-/// understands lifecycle scopes so personal data doesn't leak across sessions.
+/// (single-flight), broadcasts updates to [watch] subscribers, understands
+/// lifecycle scopes (v1.1.0), and — when given a [PersistentStore] plus
+/// codecs — survives restarts via write-through persistence and [hydrate]
+/// (v1.2.0).
 class Cache {
   Cache({
     CacheStore? store,
@@ -54,13 +60,15 @@ class Cache {
     RetryOptions? retryOptions,
     bool cacheFailures = false,
     TokenKeeperAdapter? tokenKeeper,
+    PersistentStore? persistentStore,
   })  : _store = store ?? MemoryCacheStore(),
         _defaultTtl = defaultTtl,
         _now = clock ?? DateTime.now,
         _logger = logger ?? const CacheLogger(),
         _defaultRetryOptions = retryOptions ?? RetryOptions.noRetry,
         _defaultCacheFailures = cacheFailures,
-        _tokenKeeper = tokenKeeper;
+        _tokenKeeper = tokenKeeper,
+        _persistentStore = persistentStore;
 
   final CacheStore _store;
   final Duration? _defaultTtl;
@@ -69,6 +77,7 @@ class Cache {
   final RetryOptions _defaultRetryOptions;
   final bool _defaultCacheFailures;
   final TokenKeeperAdapter? _tokenKeeper;
+  final PersistentStore? _persistentStore;
 
   final Map<String, Future<Result<dynamic>>> _inflight = {};
   final Map<String, StreamController<Result<dynamic>>> _watchers = {};
@@ -80,6 +89,18 @@ class Cache {
   final Map<String, _ScopeMeta> _scopes = {};
   String? _activeUserId;
 
+  // v1.2.0 — persistence codecs (keyed by key-prefix) + in-flight writes.
+  final Map<String, CacheCodec<dynamic>> _codecs = {};
+  final Set<Future<void>> _pendingPersistence = {};
+
+  // v1.2.0 — lifetime metrics.
+  int _hits = 0;
+  int _misses = 0;
+  int _writes = 0;
+  int _refreshes = 0;
+  int _errors = 0;
+  int _evictions = 0;
+
   /// The currently active user id, or `null` if no user is signed in.
   /// Set via [setActiveUser]. Affects [CacheScope.user] entries.
   String? get activeUserId => _activeUserId;
@@ -87,6 +108,92 @@ class Cache {
   /// The token keeper passed at construction, or `null` if none was provided.
   /// Used by [getAuthenticated].
   TokenKeeperAdapter? get tokenKeeper => _tokenKeeper;
+
+  /// `true` if this cache was configured with a [PersistentStore].
+  bool get isPersistent => _persistentStore != null;
+
+  /// An immutable snapshot of the cache's lifetime counters. New in v1.2.0.
+  CacheMetrics get metrics => CacheMetrics(
+        hits: _hits,
+        misses: _misses,
+        writes: _writes,
+        refreshes: _refreshes,
+        errors: _errors,
+        evictions: _evictions,
+      );
+
+  /// Resets every [metrics] counter back to zero. New in v1.2.0.
+  void resetMetrics() {
+    _hits = _misses = _writes = _refreshes = _errors = _evictions = 0;
+  }
+
+  /// Registers a [CacheCodec] used to persist and restore entries whose key
+  /// starts with [keyPrefix].
+  ///
+  /// When multiple prefixes match a key, the longest wins. Only keys with a
+  /// registered codec are written to the [PersistentStore]; everything else
+  /// stays memory-only.
+  ///
+  /// New in v1.2.0.
+  void registerCodec<T>(String keyPrefix, CacheCodec<T> codec) {
+    _codecs[keyPrefix] = CacheCodec<dynamic>(
+      encode: (value) => codec.encode(value as T),
+      decode: (json) => codec.decode(json) as dynamic,
+    );
+  }
+
+  /// Restores entries from the [PersistentStore] into the in-memory store.
+  ///
+  /// Call once at startup (e.g. before `runApp`) to make cached data available
+  /// immediately. Expired records are skipped and pruned from disk. Records
+  /// without a matching registered codec are left untouched on disk and not
+  /// loaded. Returns the number of entries restored.
+  ///
+  /// No-op (returns 0) when no [PersistentStore] is configured.
+  ///
+  /// New in v1.2.0.
+  Future<int> hydrate() async {
+    final store = _persistentStore;
+    if (store == null) return 0;
+
+    final records = await store.loadAll();
+    final now = _now();
+    var restored = 0;
+
+    for (final record in records) {
+      final codec = _codecFor(record.key);
+      if (codec == null) continue;
+
+      final createdAt = DateTime.fromMillisecondsSinceEpoch(record.createdAtMs);
+      final ttl =
+          record.ttlMs == null ? null : Duration(milliseconds: record.ttlMs!);
+      final entry = CacheEntry<dynamic>(
+        value: codec.decode(record.value),
+        createdAt: createdAt,
+        ttl: ttl,
+      );
+
+      if (entry.isExpiredAt(now)) {
+        _track(store.remove(record.key));
+        continue;
+      }
+
+      _store.write(record.key, entry);
+      final scope = _scopeFromName(record.scope);
+      if (scope != CacheScope.global) {
+        _scopes[record.key] = _ScopeMeta(scope, record.userId);
+      }
+      restored++;
+    }
+    return restored;
+  }
+
+  /// Awaits all outstanding write-through persistence operations.
+  ///
+  /// Persistence is fire-and-forget by default so it never blocks the read
+  /// path; call [flush] when you need a durability checkpoint (e.g. before the
+  /// app backgrounds, or in a test). New in v1.2.0.
+  Future<void> flush() => Future.wait(_pendingPersistence.toList());
 
   /// Reads from / writes to the cache for [key] according to [policy].
   ///
@@ -131,12 +238,12 @@ class Cache {
           if (cached != null && !cached.isExpiredAt(now)) {
             return _castResult<T>(cached.failure);
           }
-          _logger.onMiss(key);
+          _miss(key);
           return entry == null
               ? Failure<T>(CacheMissException(key))
               : Failure<T>(CacheExpiredException(key));
         }
-        _logger.onHit(key);
+        _hit(key);
         return Success<T>(entry.value as T);
 
       case CachePolicy.networkOnly:
@@ -154,14 +261,14 @@ class Cache {
       case CachePolicy.cacheFirst:
         final entry = _store.read(key);
         if (entry != null && !entry.isExpiredAt(now)) {
-          _logger.onHit(key);
+          _hit(key);
           return Success<T>(entry.value as T);
         }
         final cached = _failureCache[key];
         if (cached != null && !cached.isExpiredAt(now)) {
           return _castResult<T>(cached.failure);
         }
-        _logger.onMiss(key);
+        _miss(key);
         return _runFetch<T>(
           key,
           fetch,
@@ -187,7 +294,7 @@ class Cache {
         if (fresh.isSuccess) return fresh;
         final entry = _store.read(key);
         if (entry != null) {
-          _logger.onHit(key);
+          _hit(key);
           return Success<T>(entry.value as T);
         }
         final cachedFailure = _failureCache[key];
@@ -199,7 +306,7 @@ class Cache {
       case CachePolicy.staleWhileRevalidate:
         final entry = _store.read(key);
         if (entry != null) {
-          _logger.onHit(key);
+          _hit(key);
           final isStale = entry.isExpiredAt(now);
           if ((isStale || alwaysRevalidate) && !_inflight.containsKey(key)) {
             unawaited(
@@ -217,7 +324,7 @@ class Cache {
           }
           return Success<T>(entry.value as T);
         }
-        _logger.onMiss(key);
+        _miss(key);
         return _runFetch<T>(
           key,
           fetch,
@@ -321,19 +428,24 @@ class Cache {
     );
   }
 
-  /// Drops the success and failure entries for [key].
+  /// Drops the success and failure entries for [key] from memory and (if
+  /// configured) the [PersistentStore].
   void invalidate(String key) {
     _store.delete(key);
     _failureCache.remove(key);
     _scopes.remove(key);
+    _removeFromDisk(key);
     _logger.onInvalidate(key);
   }
 
-  /// Drops every entry from the store and the failure cache.
+  /// Drops every entry from the store, the failure cache, and (if configured)
+  /// the [PersistentStore].
   void clear() {
     _store.clear();
     _failureCache.clear();
     _scopes.clear();
+    final store = _persistentStore;
+    if (store != null) _track(store.clear());
     _logger.onClear();
   }
 
@@ -393,7 +505,7 @@ class Cache {
   /// the key is untracked or absent. New in v1.1.0.
   CacheScope scopeOf(String key) => _scopes[key]?.scope ?? CacheScope.global;
 
-  /// Changes the active user id and clears entries tied to the previous user.
+  /// Changes the active user id and clears entries belonging to other users.
   ///
   /// Passing `null` is equivalent to a logout for user-scoped data — see
   /// [endSession] when you also want to drop [CacheScope.session] entries.
@@ -403,11 +515,12 @@ class Cache {
   /// New in v1.1.0.
   void setActiveUser(String? userId) {
     if (userId == _activeUserId) return;
-    final previous = _activeUserId;
     _activeUserId = userId;
 
+    // Clear user-scoped entries that don't belong to the new user. This also
+    // covers entries restored by [hydrate] for a different account.
     final removed = _keysFor(
-      (meta) => meta.scope == CacheScope.user && meta.userId == previous,
+      (meta) => meta.scope == CacheScope.user && meta.userId != userId,
     );
     _invalidateKeys(removed);
     if (removed.isNotEmpty) {
@@ -415,8 +528,8 @@ class Cache {
     }
   }
 
-  /// Drops [CacheScope.session] entries and user-scoped entries for the
-  /// previously-active user, and clears [activeUserId].
+  /// Drops [CacheScope.session] and [CacheScope.user] entries, and clears
+  /// [activeUserId].
   ///
   /// Call this from your logout flow. Global entries are kept.
   ///
@@ -435,10 +548,6 @@ class Cache {
 
   /// Drops every entry recorded with [scope]. Use to wipe a specific
   /// lifecycle bucket without touching the others.
-  ///
-  /// `clearScope(CacheScope.global)` is a no-op alias for [clear] except that
-  /// it leaves user/session entries in place — pass [clear] if you want
-  /// everything gone.
   ///
   /// New in v1.1.0.
   void clearScope(CacheScope scope) {
@@ -459,6 +568,16 @@ class Cache {
   }
 
   // ── internal helpers ───────────────────────────────────────────────────────
+
+  void _hit(String key) {
+    _hits++;
+    _logger.onHit(key);
+  }
+
+  void _miss(String key) {
+    _misses++;
+    _logger.onMiss(key);
+  }
 
   void _ensureScopeUsable(CacheScope scope) {
     if (scope == CacheScope.user && _activeUserId == null) {
@@ -489,9 +608,65 @@ class Cache {
   }
 
   void _invalidateKeys(List<String> keys) {
+    _evictions += keys.length;
     for (final key in keys) {
       invalidate(key);
     }
+  }
+
+  CacheScope _scopeFromName(String name) => CacheScope.values.firstWhere(
+        (s) => s.name == name,
+        orElse: () => CacheScope.global,
+      );
+
+  CacheCodec<dynamic>? _codecFor(String key) {
+    CacheCodec<dynamic>? best;
+    var bestLen = -1;
+    _codecs.forEach((prefix, codec) {
+      if (key.startsWith(prefix) && prefix.length > bestLen) {
+        best = codec;
+        bestLen = prefix.length;
+      }
+    });
+    return best;
+  }
+
+  void _persist(String key, CacheEntry<dynamic> entry, CacheScope scope) {
+    final store = _persistentStore;
+    if (store == null) return;
+    final codec = _codecFor(key);
+    if (codec == null) return;
+
+    final record = PersistedRecord(
+      key: key,
+      value: codec.encode(entry.value),
+      createdAtMs: entry.createdAt.millisecondsSinceEpoch,
+      ttlMs: entry.ttl?.inMilliseconds,
+      scope: scope.name,
+      userId: scope == CacheScope.user
+          ? (_scopes[key]?.userId ?? _activeUserId)
+          : null,
+    );
+    _track(store.save(record));
+  }
+
+  void _removeFromDisk(String key) {
+    final store = _persistentStore;
+    if (store == null) return;
+    if (_codecFor(key) == null) return;
+    _track(store.remove(key));
+  }
+
+  /// Tracks a fire-and-forget persistence op so [flush] can await it, and
+  /// funnels any failure to [CacheLogger.onError] instead of going unhandled.
+  void _track(Future<void> op) {
+    late final Future<void> wrapped;
+    wrapped = op.then(
+      (_) {},
+      onError: (Object e, StackTrace st) =>
+          _logger.onError('<persistence>', e, st),
+    ).whenComplete(() => _pendingPersistence.remove(wrapped));
+    _pendingPersistence.add(wrapped);
   }
 
   Future<Result<T>> _runFetch<T>(
@@ -510,6 +685,7 @@ class Cache {
       return _castResult<T>(shared);
     }
 
+    _refreshes++;
     _logger.onRefresh(key, source);
     final future = _fetchAndStore<T>(
       key,
@@ -540,7 +716,7 @@ class Cache {
     required CacheScope scope,
   }) async {
     Result<T> result = Failure<T>(StateError('unreachable'));
-    int attempt = 0;
+    var attempt = 0;
 
     while (true) {
       attempt++;
@@ -567,6 +743,7 @@ class Cache {
     }
 
     if (result is Failure<T>) {
+      _errors++;
       _logger.onError(key, result.error, result.stackTrace);
       if (persist && cacheFailures) {
         _failureCache[key] = _CachedFailure(
@@ -580,13 +757,14 @@ class Cache {
     }
 
     if (persist && result is Success<T>) {
-      _store.write(
-        key,
-        CacheEntry<T>(value: result.value, createdAt: _now(), ttl: ttl),
-      );
+      final entry =
+          CacheEntry<T>(value: result.value, createdAt: _now(), ttl: ttl);
+      _store.write(key, entry);
       _failureCache.remove(key);
       _recordScope(key, scope);
+      _writes++;
       _logger.onWrite(key, ttl: ttl);
+      _persist(key, entry, scope);
       _emit<T>(key, result);
     }
     return result;
