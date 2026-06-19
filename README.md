@@ -32,7 +32,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^1.2.0
+  cachemesh: ^2.0.0
 ```
 
 ## Quick start
@@ -333,12 +333,88 @@ m.lookups;         // hits + misses
 cache.resetMetrics();
 ```
 
+## Unified data pipeline *(v2.0.0)*
+
+Define an endpoint once, use it everywhere — no more repeating
+`cache.get(key: ..., fetch: ...)` at every call site.
+
+```dart
+final users = cache.endpoint<int, User>(
+  key: (id) => 'user:$id',
+  fetch: (id) => api.fetchUser(id),
+  policy: CachePolicy.staleWhileRevalidate,
+  ttl: const Duration(minutes: 5),
+);
+
+await users(42);        // cached read
+users.watch(42);        // reactive stream
+await users.refresh(7); // force refresh
+users.invalidate(7);    // drop this entry
+users.invalidateAll();  // drop every key this endpoint produced
+```
+
+Authenticated endpoints route every fetch through the configured
+`TokenKeeperAdapter` and default to `CacheScope.user`:
+
+```dart
+final cache = Cache(tokenKeeper: myKeeper);
+cache.setActiveUser('alice');
+
+final me = cache.authenticatedEndpoint<int, User>(
+  key: (id) => 'me:$id',
+  fetch: (id, token) => api.me(id, token),
+);
+
+await me(0);            // cached, per-user, token-aware
+```
+
+## Reactive data graph *(v2.0.0)*
+
+Combine multiple cache keys into one reactive stream — emits whenever any
+underlying key updates:
+
+```dart
+final stream = cache.combineLatest<DashboardVm>(
+  ['user:42', 'feed:home', 'notifications:unread'],
+  (values) => DashboardVm(
+    user: values[0] as User,
+    feed: values[1] as Feed,
+    badge: values[2] as int,
+  ),
+);
+
+stream.listen((result) => ui.render(result));
+
+// Synchronous combined read (returns null if any key is missing):
+final initial = cache.peekCombined(['a', 'b'], (vs) => ...);
+```
+
+## Dev tooling *(v2.0.0)*
+
+```dart
+cache.size;            // number of entries
+cache.allKeys;         // Iterable<String>
+cache.contains('k');   // any entry (fresh or stale)
+cache.snapshot();      // Map<key, CacheState> — no fetch
+
+// Refresh createdAt + optionally swap TTL without re-fetching:
+cache.touch('feature-flags', ttl: const Duration(hours: 1));
+
+print(cache.debugDump());
+// Cache(size=3, CacheMetrics(hits: 12, ..., hitRate: 80.0%))
+//   activeUser=alice, persistent=true, tokenKeeper=true
+//   - user:42                    fresh  scope=user     age=2103ms  ttl=300000ms
+//   - feed:home                  fresh  scope=session  age=540ms   ttl=60000ms
+//   - notifications:unread       stale  scope=user     age=70241ms ttl=30000ms
+```
+
 ## Roadmap
 
 - **1.0.1** ✅ — pluggable logger, cache state insights, safer expiry.
 - **1.0.2** ✅ — failure-aware caching, retry hooks, smarter SWR.
 - **1.1.0** ✅ — resilify & token_keeper integration, cache scopes.
 - **1.2.0** ✅ — disk adapters, hydration, offline-first, metrics.
+- **2.0.0** ✅ — unified data engine: endpoints, reactive combine, dev tooling.
 - **2.0.0** — unified data engine + reactive data graph.
 
 ## ❤️ Support

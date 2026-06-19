@@ -7,6 +7,7 @@ library;
 
 export 'src/cache.dart';
 export 'src/cache_codec.dart';
+export 'src/cache_endpoint.dart';
 export 'src/cache_entry.dart';
 export 'src/cache_exception.dart';
 export 'src/cache_logger.dart';

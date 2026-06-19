@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'cache_codec.dart';
+import 'cache_endpoint.dart';
 import 'cache_entry.dart';
 import 'cache_exception.dart';
 import 'cache_logger.dart';
@@ -549,6 +550,10 @@ class Cache {
   /// Drops every entry recorded with [scope]. Use to wipe a specific
   /// lifecycle bucket without touching the others.
   ///
+  /// **Note:** [CacheScope.global] entries are not tracked in the scope index
+  /// (the absence of a scope record *is* the global scope), so passing
+  /// `CacheScope.global` is a no-op. Use [clear] to drop globals too.
+  ///
   /// New in v1.1.0.
   void clearScope(CacheScope scope) {
     final removed = _keysFor((meta) => meta.scope == scope);
@@ -558,8 +563,261 @@ class Cache {
     }
   }
 
-  /// Closes any open watcher streams. Safe to call multiple times.
+  // ── v2.0.0 — unified data engine ───────────────────────────────────────────
+
+  /// Number of entries currently held by the in-memory store (fresh or stale).
+  ///
+  /// New in v2.0.0.
+  int get size => _store.keys().length;
+
+  /// All keys currently held by the in-memory store.
+  ///
+  /// New in v2.0.0.
+  Iterable<String> get allKeys => _store.keys();
+
+  /// `true` if [key] has any entry in the store, even an expired one.
+  ///
+  /// New in v2.0.0.
+  bool contains(String key) => _store.contains(key);
+
+  /// Resets an entry's `createdAt` to *now*, extending its TTL window without
+  /// re-fetching. Use when you have out-of-band evidence the entry is still
+  /// valid (e.g. a websocket "no changes" ping). Optionally swap the TTL too.
+  ///
+  /// No-op when [key] is absent.
+  ///
+  /// New in v2.0.0.
+  void touch(String key, {Duration? ttl}) {
+    final entry = _store.read(key);
+    if (entry == null) return;
+    final refreshed = CacheEntry<dynamic>(
+      value: entry.value,
+      createdAt: _now(),
+      ttl: ttl ?? entry.ttl,
+    );
+    _store.write(key, refreshed);
+    _persist(key, refreshed, scopeOf(key));
+  }
+
+  /// A snapshot of every cache entry as a `Map<key, CacheState>`. Doesn't
+  /// trigger any fetch. Handy for dev tooling and tests.
+  ///
+  /// New in v2.0.0.
+  Map<String, CacheState<dynamic>> snapshot() {
+    final out = <String, CacheState<dynamic>>{};
+    final now = _now();
+    for (final key in _store.keys()) {
+      final entry = _store.read(key);
+      if (entry == null) continue;
+      out[key] = CacheState<dynamic>(
+        key: key,
+        now: now,
+        value: entry.value,
+        createdAt: entry.createdAt,
+        ttl: entry.ttl,
+      );
+    }
+    return out;
+  }
+
+  /// Human-readable dump of cache state — entries, scopes, freshness,
+  /// metrics, and active user. Designed for `print(cache.debugDump())`.
+  ///
+  /// New in v2.0.0.
+  String debugDump() {
+    final buf = StringBuffer()
+      ..writeln('Cache(size=$size, ${metrics.toString()})')
+      ..writeln('  activeUser=${_activeUserId ?? "<none>"}, '
+          'persistent=$isPersistent, '
+          'tokenKeeper=${_tokenKeeper != null}');
+    final snap = snapshot();
+    if (snap.isEmpty) {
+      buf.writeln('  (no entries)');
+    } else {
+      for (final entry in snap.entries) {
+        final s = entry.value;
+        final scope = scopeOf(entry.key);
+        final freshness = s.isFresh ? 'fresh' : 'stale';
+        final ageS = s.age?.inMilliseconds;
+        buf.writeln('  - ${entry.key.padRight(28)} '
+            '$freshness  scope=${scope.name}  '
+            'age=${ageS}ms  ttl=${s.ttl?.inMilliseconds ?? '∞'}ms');
+      }
+    }
+    if (_failureCache.isNotEmpty) {
+      buf.writeln('  cached-failures: ${_failureCache.keys.join(', ')}');
+    }
+    return buf.toString();
+  }
+
+  /// Builds a reusable, parameterised [CacheEndpoint] over this cache.
+  ///
+  /// The endpoint bundles a key-builder, fetcher, and policy so callers can
+  /// just `await users(42)` instead of repeating `cache.get(...)` everywhere.
+  ///
+  /// New in v2.0.0.
+  CacheEndpoint<P, T> endpoint<P, T>({
+    required KeyBuilder<P> key,
+    required EndpointFetcher<P, T> fetch,
+    CachePolicy policy = CachePolicy.cacheFirst,
+    Duration? ttl,
+    CacheScope scope = CacheScope.global,
+    RetryOptions? retryOptions,
+    bool? cacheFailures,
+    bool alwaysRevalidate = false,
+  }) =>
+      CacheEndpoint<P, T>(
+        cache: this,
+        key: key,
+        fetch: fetch,
+        policy: policy,
+        ttl: ttl,
+        scope: scope,
+        retryOptions: retryOptions,
+        cacheFailures: cacheFailures,
+        alwaysRevalidate: alwaysRevalidate,
+      );
+
+  /// Builds an [AuthenticatedCacheEndpoint] — like [endpoint] but routes the
+  /// fetcher through the configured [TokenKeeperAdapter].
+  ///
+  /// Throws [StateError] if no [TokenKeeperAdapter] was passed to [Cache.new].
+  ///
+  /// New in v2.0.0.
+  AuthenticatedCacheEndpoint<P, T> authenticatedEndpoint<P, T>({
+    required KeyBuilder<P> key,
+    required AuthEndpointFetcher<P, T> fetch,
+    CachePolicy policy = CachePolicy.cacheFirst,
+    Duration? ttl,
+    CacheScope scope = CacheScope.user,
+    RetryOptions? retryOptions,
+    bool? cacheFailures,
+    bool alwaysRevalidate = false,
+  }) {
+    if (_tokenKeeper == null) {
+      throw StateError(
+        'authenticatedEndpoint requires a TokenKeeperAdapter. '
+        'Pass one to Cache(tokenKeeper: ...).',
+      );
+    }
+    return AuthenticatedCacheEndpoint<P, T>(
+      cache: this,
+      key: key,
+      fetch: fetch,
+      policy: policy,
+      ttl: ttl,
+      scope: scope,
+      retryOptions: retryOptions,
+      cacheFailures: cacheFailures,
+      alwaysRevalidate: alwaysRevalidate,
+    );
+  }
+
+  /// Combines the cached values for [keys] into a reactive stream.
+  ///
+  /// Emits the result of [combine] whenever any of the underlying keys
+  /// updates. If any key currently holds a cached [Failure], the failure is
+  /// propagated until that key reports a success again. The stream is
+  /// single-subscription (call `.asBroadcastStream()` if you need multiple
+  /// listeners); the initial value (if all keys have data) is emitted on the
+  /// next microtask after `listen()`.
+  ///
+  /// New in v2.0.0.
+  Stream<Result<R>> combineLatest<R>(
+    List<String> keys,
+    R Function(List<Object?> values) combine,
+  ) {
+    if (keys.isEmpty) {
+      return Stream<Result<R>>.value(Success<R>(combine(const [])));
+    }
+
+    late StreamController<Result<R>> controller;
+    final values = List<Object?>.filled(keys.length, null);
+    final hasValue = List<bool>.filled(keys.length, false);
+    final failures = List<Failure<dynamic>?>.filled(keys.length, null);
+    final subs = <StreamSubscription<Result<dynamic>>>[];
+
+    void emit() {
+      if (controller.isClosed) return;
+      for (final f in failures) {
+        if (f != null) {
+          controller.add(_castResult<R>(f));
+          return;
+        }
+      }
+      if (hasValue.every((b) => b)) {
+        try {
+          controller.add(Success<R>(combine(List.of(values))));
+        } catch (e, st) {
+          controller.add(Failure<R>(e, st));
+        }
+      }
+    }
+
+    controller = StreamController<Result<R>>(
+      onListen: () {
+        for (var i = 0; i < keys.length; i++) {
+          final v = peek<dynamic>(keys[i]);
+          if (v != null) {
+            values[i] = v;
+            hasValue[i] = true;
+          }
+        }
+        for (var i = 0; i < keys.length; i++) {
+          final idx = i;
+          subs.add(
+            watch<dynamic>(keys[i]).listen((r) {
+              if (r is Success) {
+                values[idx] = r.value;
+                hasValue[idx] = true;
+                failures[idx] = null;
+              } else if (r is Failure) {
+                failures[idx] = r;
+              }
+              emit();
+            }),
+          );
+        }
+        scheduleMicrotask(emit);
+      },
+      onCancel: () async {
+        for (final s in subs) {
+          await s.cancel();
+        }
+        subs.clear();
+      },
+    );
+    return controller.stream;
+  }
+
+  /// Synchronous, non-fetching combined read. Returns `null` when any key is
+  /// missing from the cache. Useful for seeding UI before subscribing to
+  /// [combineLatest].
+  ///
+  /// New in v2.0.0.
+  Result<R>? peekCombined<R>(
+    List<String> keys,
+    R Function(List<Object?> values) combine,
+  ) {
+    final values = <Object?>[];
+    for (final key in keys) {
+      final v = peek<dynamic>(key);
+      if (v == null) return null;
+      values.add(v);
+    }
+    try {
+      return Success<R>(combine(values));
+    } catch (e, st) {
+      return Failure<R>(e, st);
+    }
+  }
+
+  /// Awaits any pending persistence writes, then closes watcher streams.
+  ///
+  /// In v2.0.0 [dispose] flushes first so durability isn't lost when an app
+  /// shuts down immediately after a write.
   Future<void> dispose() async {
+    await flush();
     final controllers = List.of(_watchers.values);
     _watchers.clear();
     for (final c in controllers) {
