@@ -1,6 +1,6 @@
 name: cachemesh
 description: Result-first caching and data orchestration layer for Dart and Flutter apps. Memory-first cache with policies, single-flight dedup, and reactive watch streams.
-version: 1.2.0
+version: 2.0.0
 homepage: https://github.com/himanshulahoti20/cachemesh
 repository: https://github.com/himanshulahoti20/cachemesh
 issue_tracker: https://github.com/himanshulahoti20/cachemesh/issues

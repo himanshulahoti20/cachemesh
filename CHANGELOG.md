@@ -1,5 +1,71 @@
 # Changelog
 
+## 2.0.0
+
+Unified Data Engine — a major version, but **fully backward compatible**.
+Every 1.x call site continues to work; v2.0.0 layers a higher-level pipeline,
+reactive composition, and dev tooling on top.
+
+### Unified data pipeline
+
+- **`CacheEndpoint<P, T>`** — bundle a key-builder, fetcher, and policy once;
+  reuse everywhere. Replaces the repeated `cache.get(key: ..., fetch: ...)`
+  ceremony at call sites:
+
+  ```dart
+  final users = cache.endpoint<int, User>(
+    key: (id) => 'user:$id',
+    fetch: (id) => api.fetchUser(id),
+    policy: CachePolicy.staleWhileRevalidate,
+  );
+  await users(42);
+  users.watch(42);
+  users.invalidateAll();
+  ```
+
+- **`AuthenticatedCacheEndpoint<P, T>`** — like `CacheEndpoint` but routes
+  every fetch through the configured `TokenKeeperAdapter` (defaults to
+  `CacheScope.user`). Wire your `resilify` calls + `token_keeper` once and
+  the rest of the app just sees `await me(id)`.
+- Endpoints track `ownedKeys` so `invalidateAll()` only drops their entries,
+  not the whole cache.
+
+### Reactive data graph
+
+- **`cache.combineLatest<R>(keys, combine)`** — single-subscription stream
+  that emits whenever any underlying key updates. Failures propagate; missing
+  values delay the first emission until every key has data. Combine-thrown
+  exceptions are wrapped as `Failure`.
+- **`cache.peekCombined<R>(keys, combine)`** — synchronous combined read for
+  seeding UI before subscribing.
+
+### Dev tooling & introspection
+
+- **`cache.snapshot()`** — `Map<String, CacheState>` of every entry, no fetch.
+- **`cache.debugDump()`** — pretty-printed multi-line summary including
+  metrics, active user, persistence flag, and per-entry freshness/scope/age.
+- **`cache.size`**, **`cache.allKeys`**, **`cache.contains(key)`** —
+  zero-cost introspection.
+- **`cache.touch(key, {ttl})`** — refresh `createdAt` (and optionally swap
+  TTL) without re-fetching, for when out-of-band evidence confirms freshness.
+
+### Bug fixes
+
+- **`Cache.dispose()` now awaits `flush()` first** so persistence writes
+  in flight at shutdown actually land on disk. Previously, calling
+  `dispose()` immediately after a write could abandon the pending op.
+- **`clearScope(CacheScope.global)`** documented as a no-op: global entries
+  aren't tracked in the scope index (absence *is* global). Use `clear()` to
+  drop globals too.
+
+### Notes
+
+- Listed as a major version because of the *architectural* additions
+  (endpoint as the new primary abstraction). The 1.x surface — `get`,
+  `refresh`, `watch`, `invalidate`, `setActiveUser`, etc. — is untouched.
+- Memory cost of v2.0.0: each endpoint keeps a `Set<String>` of its owned
+  keys for `invalidateAll`. Skip the endpoint API and the cost is zero.
+
 ## 1.2.0
 
 Persistence & offline support — no breaking changes.
