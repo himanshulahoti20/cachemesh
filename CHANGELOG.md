@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.1.0
+
+Bounded caches, tag invalidation, direct writes — fully backward compatible
+with 2.0.x.
+
+### Bounded memory (LRU)
+
+- **`Cache(maxEntries: n)`** — cap the in-memory store. When a write pushes the
+  cache past `n` entries, the least recently used entry is evicted (reads via
+  `get` hits and `peek` count as use). Eviction also removes the entry from the
+  `PersistentStore`, increments `metrics.evictions`, and fires the new
+  `CacheLogger.onEvict(key)`. Unbounded by default.
+- `cache.maxEntries` getter.
+
+### Tags
+
+- **`tags: {...}`** on `get`, `getAuthenticated`, `refresh`, `prefetch`, `set`
+  and on endpoints (`endpoint` / `authenticatedEndpoint`) — label entries by
+  concern.
+- **`cache.invalidateTag(tag)`** — drop everything carrying a tag (including
+  cached failures); returns the count. `cache.tagsOf(key)` reads them back.
+- Tags are in-memory only: entries restored by `hydrate()` carry none.
+
+### Direct writes & bulk invalidation
+
+- **`cache.set<T>(key, value, {ttl, scope, tags})`** — write without a fetch:
+  seed the cache or apply an optimistic update. Notifies `watch` subscribers,
+  persists, and clears any cached failure for the key.
+- **`cache.update<T>(key, transform)`** — transform the current value in place,
+  keeping its TTL, scope and tags. Returns the new value, or `null` (no-op)
+  when the key is absent or expired.
+- **`cache.invalidateWhere(test)`** — drop every key matching a predicate;
+  returns the count.
+
+### Reactive
+
+- **`cache.watch(key, emitCurrent: true)`** — subscribers first receive the
+  currently cached value (fresh or stale), then live updates. Default
+  behaviour is unchanged.
+
 ## 2.0.0
 
 Unified Data Engine — a major version, but **fully backward compatible**.

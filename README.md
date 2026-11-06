@@ -32,7 +32,7 @@ as the rest of your data layer.
 
 ```yaml
 dependencies:
-  cachemesh: ^2.0.0
+  cachemesh: ^2.1.0
 ```
 
 ## Quick start
@@ -368,6 +368,30 @@ final me = cache.authenticatedEndpoint<int, User>(
 await me(0);            // cached, per-user, token-aware
 ```
 
+## Bounded caches, tags & direct writes *(v2.1.0)*
+
+```dart
+// Cap memory: least-recently-used entries are evicted past 500.
+final cache = Cache(maxEntries: 500);
+
+// Tag entries by concern, invalidate them together.
+await cache.get(key: 'feed:1', fetch: loadFeed, tags: {'feed'});
+cache.invalidateTag('feed');                        // → number dropped
+
+// Write without a fetch (seed / optimistic update).
+cache.set('user:1', user, tags: {'user'});
+cache.update<User>('user:1', (u) => u.copyWith(name: 'New'));
+cache.invalidateWhere((k) => k.startsWith('user:'));
+
+// Get the current value first, then live updates — ideal for UI.
+cache.watch<User>('user:1', emitCurrent: true).listen(render);
+```
+
+- Eviction also removes the entry from a `PersistentStore`, bumps
+  `metrics.evictions`, and fires `CacheLogger.onEvict`.
+- `set`/`update` notify `watch` subscribers and persist like any other write.
+- Tags live in memory only; entries restored by `hydrate()` carry none.
+
 ## Reactive data graph *(v2.0.0)*
 
 Combine multiple cache keys into one reactive stream — emits whenever any
@@ -415,7 +439,7 @@ print(cache.debugDump());
 - **1.1.0** ✅ — resilify & token_keeper integration, cache scopes.
 - **1.2.0** ✅ — disk adapters, hydration, offline-first, metrics.
 - **2.0.0** ✅ — unified data engine: endpoints, reactive combine, dev tooling.
-- **2.0.0** — unified data engine + reactive data graph.
+- **2.1.0** ✅ — LRU `maxEntries`, tags, `set`/`update`, `watch(emitCurrent)`.
 
 ## ❤️ Support
 

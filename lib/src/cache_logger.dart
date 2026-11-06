@@ -45,6 +45,12 @@ class CacheLogger {
   /// [Cache.clear] dropped every entry.
   void onClear() {}
 
+  /// The least-recently-used entry [key] was evicted because the cache
+  /// exceeded its `maxEntries` capacity.
+  ///
+  /// New in v2.1.0.
+  void onEvict(String key) {}
+
   /// A fetcher returned a `Failure` or threw.
   void onError(String key, Object error, StackTrace? stackTrace) {}
 
@@ -87,6 +93,9 @@ class PrintCacheLogger extends CacheLogger {
 
   @override
   void onClear() => _log('clear');
+
+  @override
+  void onEvict(String key) => _log('evict $key');
 
   @override
   void onError(String key, Object error, StackTrace? stackTrace) =>
