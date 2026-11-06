@@ -506,7 +506,8 @@ class Cache {
     return Stream<Result<T>>.multi((out) {
       final entry = _store.read(key);
       if (entry != null) out.add(Success<T>(entry.value as T));
-      final sub = live.listen(out.add, onError: out.addError, onDone: out.close);
+      final sub =
+          live.listen(out.add, onError: out.addError, onDone: out.close);
       out.onCancel = sub.cancel;
     }, isBroadcast: true);
   }
