@@ -62,7 +62,11 @@ class Cache {
     bool cacheFailures = false,
     TokenKeeperAdapter? tokenKeeper,
     PersistentStore? persistentStore,
-  })  : _store = store ?? MemoryCacheStore(),
+    int? maxEntries,
+  })  : assert(maxEntries == null || maxEntries > 0,
+            'maxEntries must be positive'),
+        _maxEntries = maxEntries,
+        _store = store ?? MemoryCacheStore(),
         _defaultTtl = defaultTtl,
         _now = clock ?? DateTime.now,
         _logger = logger ?? const CacheLogger(),
@@ -79,6 +83,7 @@ class Cache {
   final bool _defaultCacheFailures;
   final TokenKeeperAdapter? _tokenKeeper;
   final PersistentStore? _persistentStore;
+  final int? _maxEntries;
 
   final Map<String, Future<Result<dynamic>>> _inflight = {};
   final Map<String, StreamController<Result<dynamic>>> _watchers = {};
@@ -93,6 +98,10 @@ class Cache {
   // v1.2.0 — persistence codecs (keyed by key-prefix) + in-flight writes.
   final Map<String, CacheCodec<dynamic>> _codecs = {};
   final Set<Future<void>> _pendingPersistence = {};
+
+  // v2.1.0 — tag index (key -> tags) and LRU order (least recent first).
+  final Map<String, Set<String>> _tags = {};
+  final Set<String> _lru = <String>{};
 
   // v1.2.0 — lifetime metrics.
   int _hits = 0;
@@ -109,6 +118,10 @@ class Cache {
   /// The token keeper passed at construction, or `null` if none was provided.
   /// Used by [getAuthenticated].
   TokenKeeperAdapter? get tokenKeeper => _tokenKeeper;
+
+  /// The LRU capacity passed to [Cache.new], or `null` when unbounded.
+  /// New in v2.1.0.
+  int? get maxEntries => _maxEntries;
 
   /// `true` if this cache was configured with a [PersistentStore].
   bool get isPersistent => _persistentStore != null;
@@ -180,12 +193,14 @@ class Cache {
       }
 
       _store.write(record.key, entry);
+      _touchLru(record.key);
       final scope = _scopeFromName(record.scope);
       if (scope != CacheScope.global) {
         _scopes[record.key] = _ScopeMeta(scope, record.userId);
       }
       restored++;
     }
+    _evictOverflow();
     return restored;
   }
 
@@ -224,6 +239,7 @@ class Cache {
     bool? cacheFailures,
     bool alwaysRevalidate = false,
     CacheScope scope = CacheScope.global,
+    Set<String> tags = const {},
   }) async {
     _ensureScopeUsable(scope);
     final effectiveTtl = ttl ?? _defaultTtl;
@@ -257,6 +273,7 @@ class Cache {
           retryOptions: effectiveRetry,
           cacheFailures: false,
           scope: scope,
+          tags: tags,
         );
 
       case CachePolicy.cacheFirst:
@@ -279,6 +296,7 @@ class Cache {
           retryOptions: effectiveRetry,
           cacheFailures: effectiveCacheFailures,
           scope: scope,
+          tags: tags,
         );
 
       case CachePolicy.networkFirst:
@@ -291,6 +309,7 @@ class Cache {
           retryOptions: effectiveRetry,
           cacheFailures: effectiveCacheFailures,
           scope: scope,
+          tags: tags,
         );
         if (fresh.isSuccess) return fresh;
         final entry = _store.read(key);
@@ -320,6 +339,7 @@ class Cache {
                 retryOptions: effectiveRetry,
                 cacheFailures: effectiveCacheFailures,
                 scope: scope,
+                tags: tags,
               ),
             );
           }
@@ -335,6 +355,7 @@ class Cache {
           retryOptions: effectiveRetry,
           cacheFailures: effectiveCacheFailures,
           scope: scope,
+          tags: tags,
         );
     }
   }
@@ -364,6 +385,7 @@ class Cache {
     bool? cacheFailures,
     bool alwaysRevalidate = false,
     CacheScope scope = CacheScope.user,
+    Set<String> tags = const {},
   }) {
     final keeper = _tokenKeeper;
     if (keeper == null) {
@@ -381,6 +403,7 @@ class Cache {
       cacheFailures: cacheFailures,
       alwaysRevalidate: alwaysRevalidate,
       scope: scope,
+      tags: tags,
     );
   }
 
@@ -392,6 +415,7 @@ class Cache {
     RetryOptions? retryOptions,
     bool? cacheFailures,
     CacheScope scope = CacheScope.global,
+    Set<String> tags = const {},
   }) {
     _ensureScopeUsable(scope);
     return _runFetch<T>(
@@ -403,6 +427,7 @@ class Cache {
       retryOptions: retryOptions ?? _defaultRetryOptions,
       cacheFailures: cacheFailures ?? _defaultCacheFailures,
       scope: scope,
+      tags: tags,
     );
   }
 
@@ -415,6 +440,7 @@ class Cache {
     RetryOptions? retryOptions,
     bool? cacheFailures,
     CacheScope scope = CacheScope.global,
+    Set<String> tags = const {},
   }) {
     _ensureScopeUsable(scope);
     return _runFetch<T>(
@@ -426,17 +452,24 @@ class Cache {
       retryOptions: retryOptions ?? _defaultRetryOptions,
       cacheFailures: cacheFailures ?? _defaultCacheFailures,
       scope: scope,
+      tags: tags,
     );
   }
 
   /// Drops the success and failure entries for [key] from memory and (if
   /// configured) the [PersistentStore].
   void invalidate(String key) {
+    _remove(key);
+    _logger.onInvalidate(key);
+  }
+
+  void _remove(String key) {
     _store.delete(key);
     _failureCache.remove(key);
     _scopes.remove(key);
+    _tags.remove(key);
+    _lru.remove(key);
     _removeFromDisk(key);
-    _logger.onInvalidate(key);
   }
 
   /// Drops every entry from the store, the failure cache, and (if configured)
@@ -445,6 +478,8 @@ class Cache {
     _store.clear();
     _failureCache.clear();
     _scopes.clear();
+    _tags.clear();
+    _lru.clear();
     final store = _persistentStore;
     if (store != null) _track(store.clear());
     _logger.onClear();
@@ -457,12 +492,23 @@ class Cache {
   /// refresh from [CachePolicy.staleWhileRevalidate]). Subscribers do not
   /// receive the current cached value on subscription — call [get] (or
   /// [peek]) for that.
-  Stream<Result<T>> watch<T>(String key) {
+  ///
+  /// With [emitCurrent] (v2.1.0), a subscriber first receives the value
+  /// currently cached for [key] — fresh or stale — as a [Success], then live
+  /// updates. Nothing extra is emitted when [key] is absent.
+  Stream<Result<T>> watch<T>(String key, {bool emitCurrent = false}) {
     final controller = _watchers.putIfAbsent(
       key,
       () => StreamController<Result<dynamic>>.broadcast(),
     );
-    return controller.stream.map(_castResult<T>);
+    final live = controller.stream.map(_castResult<T>);
+    if (!emitCurrent) return live;
+    return Stream<Result<T>>.multi((out) {
+      final entry = _store.read(key);
+      if (entry != null) out.add(Success<T>(entry.value as T));
+      final sub = live.listen(out.add, onError: out.addError, onDone: out.close);
+      out.onCancel = sub.cancel;
+    }, isBroadcast: true);
   }
 
   /// Synchronous, non-fetching read of the cache.
@@ -473,6 +519,7 @@ class Cache {
     final entry = _store.read(key);
     if (entry == null) return null;
     if (!allowExpired && entry.isExpiredAt(_now())) return null;
+    _touchLru(key);
     return entry.value as T;
   }
 
@@ -650,6 +697,72 @@ class Cache {
     return buf.toString();
   }
 
+  // ── v2.1.0 — direct writes & bulk invalidation ─────────────────────────────
+
+  /// Writes [value] straight into the cache — no fetch. Use it to seed the
+  /// cache or to apply an optimistic update. Notifies [watch] subscribers,
+  /// persists (if configured), and clears any cached failure for [key].
+  ///
+  /// [ttl] defaults to the cache-wide default TTL.
+  ///
+  /// New in v2.1.0.
+  void set<T>(
+    String key,
+    T value, {
+    Duration? ttl,
+    CacheScope scope = CacheScope.global,
+    Set<String> tags = const {},
+  }) {
+    _ensureScopeUsable(scope);
+    _write<T>(key, value, ttl: ttl ?? _defaultTtl, scope: scope, tags: tags);
+  }
+
+  /// Replaces the cached value for [key] with `transform(current)`.
+  ///
+  /// Keeps the entry's existing TTL and scope, but restarts its freshness
+  /// window. Returns the new value, or `null` (and does nothing) when [key] is
+  /// absent or expired — there is nothing to transform.
+  ///
+  /// New in v2.1.0.
+  T? update<T>(String key, T Function(T current) transform) {
+    final entry = _store.read(key);
+    if (entry == null || entry.isExpiredAt(_now())) return null;
+    final next = transform(entry.value as T);
+    _write<T>(
+      key,
+      next,
+      ttl: entry.ttl,
+      scope: scopeOf(key),
+      tags: _tags[key] ?? const {},
+    );
+    return next;
+  }
+
+  /// Invalidates every key for which [test] returns `true` and returns how
+  /// many were dropped, e.g. `cache.invalidateWhere((k) => k.startsWith('user:'))`.
+  ///
+  /// New in v2.1.0.
+  int invalidateWhere(bool Function(String key) test) {
+    final keys = {..._store.keys(), ..._failureCache.keys}.where(test).toList();
+    keys.forEach(invalidate);
+    return keys.length;
+  }
+
+  /// Invalidates every entry written with [tag] (see the `tags` parameter of
+  /// [get], [set], [refresh], [prefetch] and endpoints). Returns how many keys
+  /// were dropped.
+  ///
+  /// Tags are in-memory only: entries restored by [hydrate] carry no tags.
+  ///
+  /// New in v2.1.0.
+  int invalidateTag(String tag) =>
+      invalidateWhere((key) => _tags[key]?.contains(tag) ?? false);
+
+  /// The tags recorded for [key] (empty when untagged or absent).
+  ///
+  /// New in v2.1.0.
+  Set<String> tagsOf(String key) => _tags[key] ?? const {};
+
   /// Builds a reusable, parameterised [CacheEndpoint] over this cache.
   ///
   /// The endpoint bundles a key-builder, fetcher, and policy so callers can
@@ -662,6 +775,7 @@ class Cache {
     CachePolicy policy = CachePolicy.cacheFirst,
     Duration? ttl,
     CacheScope scope = CacheScope.global,
+    Set<String> tags = const {},
     RetryOptions? retryOptions,
     bool? cacheFailures,
     bool alwaysRevalidate = false,
@@ -673,6 +787,7 @@ class Cache {
         policy: policy,
         ttl: ttl,
         scope: scope,
+        tags: tags,
         retryOptions: retryOptions,
         cacheFailures: cacheFailures,
         alwaysRevalidate: alwaysRevalidate,
@@ -690,6 +805,7 @@ class Cache {
     CachePolicy policy = CachePolicy.cacheFirst,
     Duration? ttl,
     CacheScope scope = CacheScope.user,
+    Set<String> tags = const {},
     RetryOptions? retryOptions,
     bool? cacheFailures,
     bool alwaysRevalidate = false,
@@ -707,6 +823,7 @@ class Cache {
       policy: policy,
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
       alwaysRevalidate: alwaysRevalidate,
@@ -828,6 +945,7 @@ class Cache {
   // ── internal helpers ───────────────────────────────────────────────────────
 
   void _hit(String key) {
+    _touchLru(key);
     _hits++;
     _logger.onHit(key);
   }
@@ -843,6 +961,33 @@ class Cache {
         'CacheScope.user requires an active user. '
         'Call cache.setActiveUser(userId) before using user-scoped entries.',
       );
+    }
+  }
+
+  void _recordTags(String key, Set<String> tags) {
+    if (tags.isEmpty) {
+      _tags.remove(key);
+    } else {
+      _tags[key] = Set.unmodifiable(tags);
+    }
+  }
+
+  void _touchLru(String key) {
+    if (_maxEntries == null) return;
+    _lru
+      ..remove(key)
+      ..add(key);
+  }
+
+  /// Evicts least-recently-used entries until the store fits [maxEntries].
+  void _evictOverflow() {
+    final max = _maxEntries;
+    if (max == null) return;
+    while (_lru.length > max) {
+      final victim = _lru.first;
+      _remove(victim);
+      _evictions++;
+      _logger.onEvict(victim);
     }
   }
 
@@ -938,6 +1083,7 @@ class Cache {
     required RetryOptions retryOptions,
     required bool cacheFailures,
     required CacheScope scope,
+    required Set<String> tags,
   }) async {
     final existing = _inflight[key];
     if (existing != null) {
@@ -955,6 +1101,7 @@ class Cache {
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
       scope: scope,
+      tags: tags,
     );
     _inflight[key] = future;
     try {
@@ -974,6 +1121,7 @@ class Cache {
     required RetryOptions retryOptions,
     required bool cacheFailures,
     required CacheScope scope,
+    required Set<String> tags,
   }) async {
     Result<T> result = Failure<T>(StateError('unreachable'));
     var attempt = 0;
@@ -1012,22 +1160,37 @@ class Cache {
           ttl: ttl,
         );
         _recordScope(key, scope);
+        _recordTags(key, tags);
       }
       return result;
     }
 
     if (persist && result is Success<T>) {
-      final entry =
-          CacheEntry<T>(value: result.value, createdAt: _now(), ttl: ttl);
-      _store.write(key, entry);
-      _failureCache.remove(key);
-      _recordScope(key, scope);
-      _writes++;
-      _logger.onWrite(key, ttl: ttl);
-      _persist(key, entry, scope);
-      _emit<T>(key, result);
+      _write<T>(key, result.value, ttl: ttl, scope: scope, tags: tags);
     }
     return result;
+  }
+
+  /// Stores [value], clears any cached failure, persists, and notifies
+  /// watchers. Shared by [set], [update], and the fetch path.
+  void _write<T>(
+    String key,
+    T value, {
+    required Duration? ttl,
+    required CacheScope scope,
+    required Set<String> tags,
+  }) {
+    final entry = CacheEntry<T>(value: value, createdAt: _now(), ttl: ttl);
+    _store.write(key, entry);
+    _failureCache.remove(key);
+    _recordScope(key, scope);
+    _recordTags(key, tags);
+    _writes++;
+    _logger.onWrite(key, ttl: ttl);
+    _persist(key, entry, scope);
+    _touchLru(key);
+    _evictOverflow();
+    _emit<T>(key, Success<T>(value));
   }
 
   void _emit<T>(String key, Result<T> result) {

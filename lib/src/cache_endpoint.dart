@@ -48,6 +48,7 @@ class CacheEndpoint<P, T> {
     this.policy = CachePolicy.cacheFirst,
     this.ttl,
     this.scope = CacheScope.global,
+    this.tags = const {},
     this.retryOptions,
     this.cacheFailures,
     this.alwaysRevalidate = false,
@@ -69,6 +70,10 @@ class CacheEndpoint<P, T> {
 
   /// Default scope applied to writes.
   final CacheScope scope;
+
+  /// Tags applied to every entry this endpoint writes (see
+  /// [Cache.invalidateTag]). New in v2.1.0.
+  final Set<String> tags;
 
   /// Default retry behaviour for fetches initiated by this endpoint.
   final RetryOptions? retryOptions;
@@ -96,6 +101,7 @@ class CacheEndpoint<P, T> {
       policy: policy,
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
       alwaysRevalidate: alwaysRevalidate,
@@ -111,6 +117,7 @@ class CacheEndpoint<P, T> {
       fetch: () => fetch(params),
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
     );
@@ -125,6 +132,7 @@ class CacheEndpoint<P, T> {
       fetch: () => fetch(params),
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
     );
@@ -174,6 +182,7 @@ class AuthenticatedCacheEndpoint<P, T> {
     this.policy = CachePolicy.cacheFirst,
     this.ttl,
     this.scope = CacheScope.user,
+    this.tags = const {},
     this.retryOptions,
     this.cacheFailures,
     this.alwaysRevalidate = false,
@@ -185,6 +194,10 @@ class AuthenticatedCacheEndpoint<P, T> {
   final CachePolicy policy;
   final Duration? ttl;
   final CacheScope scope;
+
+  /// Tags applied to every entry this endpoint writes (see
+  /// [Cache.invalidateTag]). New in v2.1.0.
+  final Set<String> tags;
   final RetryOptions? retryOptions;
   final bool? cacheFailures;
   final bool alwaysRevalidate;
@@ -204,6 +217,7 @@ class AuthenticatedCacheEndpoint<P, T> {
       policy: policy,
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
       alwaysRevalidate: alwaysRevalidate,
@@ -223,6 +237,7 @@ class AuthenticatedCacheEndpoint<P, T> {
       policy: CachePolicy.networkFirst,
       ttl: ttl,
       scope: scope,
+      tags: tags,
       retryOptions: retryOptions,
       cacheFailures: cacheFailures,
     );
